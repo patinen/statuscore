@@ -13,12 +13,36 @@ type Monitor = {
   id: string;
   name: string;
   url: string;
-  method: string;
+  method: "GET" | "HEAD";
   enabled: boolean;
   currentStatus: string;
   expectedStatusCode: number;
   intervalSeconds: number;
   timeoutMs: number;
+  failureThreshold: number;
+  lastCheckedAt: string | null;
+};
+
+type MonitorForm = {
+  name: string;
+  url: string;
+  method: "GET" | "HEAD";
+  expectedStatusCode: number;
+  intervalSeconds: number;
+  timeoutMs: number;
+  failureThreshold: number;
+  enabled: boolean;
+};
+
+const defaultForm: MonitorForm = {
+  name: "StatusCore API",
+  url: "https://example.com",
+  method: "GET",
+  expectedStatusCode: 200,
+  intervalSeconds: 60,
+  timeoutMs: 10000,
+  failureThreshold: 3,
+  enabled: true,
 };
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -55,35 +79,63 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [monitors, setMonitors] = useState<Monitor[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [name, setName] = useState("StatusCore API");
-  const [url, setUrl] = useState("https://example.com");
+  const [form, setForm] = useState<MonitorForm>(defaultForm);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const isAuthenticated = Boolean(user);
-
   const headerLabel = useMemo(() => (isAuthenticated ? "Connected" : "Self-hosted"), [isAuthenticated]);
 
-  const loadSession = async () => {
-    try {
-      const currentUser = await apiRequest<User>("/auth/me");
-      setUser(currentUser);
-      const list = await apiRequest<Monitor[]>("/monitors");
-      setMonitors(list ?? []);
-      setError(null);
-    } catch {
-      setUser(null);
-      setMonitors([]);
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
   useEffect(() => {
+    let isActive = true;
+
+    const loadSession = async () => {
+      try {
+        const currentUser = await apiRequest<User>("/auth/me");
+        if (!isActive) {
+          return;
+        }
+
+        setUser(currentUser);
+        const list = await apiRequest<Monitor[]>("/monitors");
+        if (!isActive) {
+          return;
+        }
+
+        setMonitors(list ?? []);
+        setError(null);
+      } catch {
+        if (!isActive) {
+          return;
+        }
+
+        setUser(null);
+        setMonitors([]);
+      } finally {
+        if (isActive) {
+          setIsLoading(false);
+        }
+      }
+    };
+
     void loadSession();
+
+    return () => {
+      isActive = false;
+    };
   }, []);
 
+  const resetForm = () => {
+    setForm(defaultForm);
+    setEditingId(null);
+  };
+
+  const updateForm = <K extends keyof MonitorForm>(key: K, value: MonitorForm[K]) => {
+    setForm((currentForm) => ({ ...currentForm, [key]: value }));
+  };
+
   const handleLogin = () => {
-    window.location.href = `${apiBaseUrl}/auth/github`;
+    window.open(`${apiBaseUrl}/auth/github`, "_self");
   };
 
   const handleLogout = async () => {
@@ -91,34 +143,89 @@ export default function Home() {
       await apiRequest<void>("/auth/logout", { method: "POST" });
       setUser(null);
       setMonitors([]);
+      resetForm();
     } catch (logoutError) {
       setError(logoutError instanceof Error ? logoutError.message : "Unable to log out.");
     }
   };
 
-  const handleCreateMonitor = async () => {
+  const handleSubmit = async () => {
     try {
       setError(null);
-      const created = await apiRequest<Monitor>("/monitors", {
-        method: "POST",
-        body: JSON.stringify({
-          name,
-          url,
-          method: "GET",
-          expectedStatusCode: 200,
-          intervalSeconds: 60,
-          timeoutMs: 10000,
-          failureThreshold: 3,
-          enabled: true,
-        }),
+      const payload = {
+        ...form,
+        name: form.name.trim(),
+      };
+
+      const monitor = editingId
+        ? await apiRequest<Monitor>(`/monitors/${editingId}`, {
+            method: "PATCH",
+            body: JSON.stringify(payload),
+          })
+        : await apiRequest<Monitor>("/monitors", {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+
+      setMonitors((currentMonitors) => {
+        if (editingId) {
+          return currentMonitors.map((item) => (item.id === editingId ? monitor : item));
+        }
+
+        return [monitor, ...currentMonitors];
       });
 
-      setMonitors((currentMonitors) => [created, ...currentMonitors]);
-      setName("StatusCore API");
-      setUrl("https://example.com");
-    } catch (createError) {
-      setError(createError instanceof Error ? createError.message : "Unable to create monitor.");
+      resetForm();
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "Unable to save monitor.");
     }
+  };
+
+  const handleDelete = async (monitorId: string) => {
+    const target = monitors.find((monitor) => monitor.id === monitorId);
+    if (!target || !window.confirm(`Delete ${target.name}? This action cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      setError(null);
+      await apiRequest<void>(`/monitors/${monitorId}`, { method: "DELETE" });
+      setMonitors((currentMonitors) => currentMonitors.filter((monitor) => monitor.id !== monitorId));
+      if (editingId === monitorId) {
+        resetForm();
+      }
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Unable to delete monitor.");
+    }
+  };
+
+  const handleEnableToggle = async (monitor: Monitor) => {
+    try {
+      const updated = await apiRequest<Monitor>(`/monitors/${monitor.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: !monitor.enabled }),
+      });
+
+      setMonitors((currentMonitors) =>
+        currentMonitors.map((item) => (item.id === monitor.id ? updated : item)),
+      );
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : "Unable to update monitor.");
+    }
+  };
+
+  const beginEdit = (monitor: Monitor) => {
+    setEditingId(monitor.id);
+    setForm({
+      name: monitor.name,
+      url: monitor.url,
+      method: monitor.method,
+      expectedStatusCode: monitor.expectedStatusCode,
+      intervalSeconds: monitor.intervalSeconds,
+      timeoutMs: monitor.timeoutMs,
+      failureThreshold: monitor.failureThreshold,
+      enabled: monitor.enabled,
+    });
   };
 
   return (
@@ -177,9 +284,12 @@ export default function Home() {
               </div>
               {user ? (
                 <div className="flex items-center gap-3 rounded-full border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200">
-                  {user.avatarUrl ? (
-                    <img src={user.avatarUrl} alt={user.login} className="h-7 w-7 rounded-full" />
-                  ) : null}
+                  <div
+                    className="flex h-7 w-7 items-center justify-center rounded-full border border-zinc-600 bg-zinc-800 text-[10px] font-semibold uppercase tracking-wide text-zinc-100"
+                    aria-label={user.login}
+                  >
+                    {(user.name ?? user.login).slice(0, 1).toUpperCase()}
+                  </div>
                   <span>{user.name ?? user.login}</span>
                 </div>
               ) : null}
@@ -204,57 +314,131 @@ export default function Home() {
               </div>
             ) : (
               <div className="space-y-8">
-                <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
-                  <div className="space-y-4 rounded-lg border border-zinc-700 bg-zinc-950/40 p-5">
-                    <h2 className="text-xl font-medium text-zinc-50">Create monitor</h2>
-
-                    <div className="space-y-4">
-                      <label className="block text-sm text-zinc-300">
-                        Name
-                        <input
-                          value={name}
-                          onChange={(event) => setName(event.target.value)}
-                          className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100 outline-none ring-0 placeholder:text-zinc-500"
-                          placeholder="StatusCore API"
-                        />
-                      </label>
-
-                      <label className="block text-sm text-zinc-300">
-                        Target URL
-                        <input
-                          value={url}
-                          onChange={(event) => setUrl(event.target.value)}
-                          className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100 outline-none ring-0 placeholder:text-zinc-500"
-                          placeholder="https://example.com"
-                        />
-                      </label>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={handleCreateMonitor}
-                      className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-emerald-400"
-                    >
-                      Add monitor
-                    </button>
+                <div className="rounded-lg border border-zinc-700 bg-zinc-950/40 p-5">
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <h2 className="text-xl font-medium text-zinc-50">
+                      {editingId ? "Edit monitor" : "Create monitor"}
+                    </h2>
+                    {editingId ? (
+                      <button
+                        type="button"
+                        onClick={resetForm}
+                        className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200"
+                      >
+                        Cancel edit
+                      </button>
+                    ) : null}
                   </div>
 
-                  <div className="rounded-lg border border-zinc-700 bg-zinc-950/40 p-5">
-                    <h2 className="text-xl font-medium text-zinc-50">Overview</h2>
-                    <div className="mt-4 space-y-3 text-sm text-zinc-300">
-                      <div className="flex items-center justify-between">
-                        <span>Total monitors</span>
-                        <strong className="text-zinc-50">{monitors.length}</strong>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span>Healthy</span>
-                        <strong className="text-emerald-400">{monitors.filter((monitor) => monitor.currentStatus === "UP").length}</strong>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span>Unknown</span>
-                        <strong className="text-zinc-200">{monitors.filter((monitor) => monitor.currentStatus === "UNKNOWN").length}</strong>
-                      </div>
-                    </div>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <label className="block text-sm text-zinc-300">
+                      Name
+                      <input
+                        value={form.name}
+                        onChange={(event) => updateForm("name", event.target.value)}
+                        className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100 outline-none ring-0 placeholder:text-zinc-500"
+                        placeholder="StatusCore API"
+                      />
+                    </label>
+
+                    <label className="block text-sm text-zinc-300">
+                      URL
+                      <input
+                        value={form.url}
+                        onChange={(event) => updateForm("url", event.target.value)}
+                        className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100 outline-none ring-0 placeholder:text-zinc-500"
+                        placeholder="https://example.com"
+                      />
+                    </label>
+
+                    <label className="block text-sm text-zinc-300">
+                      HTTP method
+                      <select
+                        value={form.method}
+                        onChange={(event) => updateForm("method", event.target.value as "GET" | "HEAD")}
+                        className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                      >
+                        <option value="GET">GET</option>
+                        <option value="HEAD">HEAD</option>
+                      </select>
+                    </label>
+
+                    <label className="block text-sm text-zinc-300">
+                      Expected status code
+                      <input
+                        type="number"
+                        min={100}
+                        max={599}
+                        value={form.expectedStatusCode}
+                        onChange={(event) => updateForm("expectedStatusCode", Number(event.target.value))}
+                        className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                      />
+                    </label>
+
+                    <label className="block text-sm text-zinc-300">
+                      Check interval (seconds)
+                      <input
+                        type="number"
+                        min={60}
+                        max={86400}
+                        value={form.intervalSeconds}
+                        onChange={(event) => updateForm("intervalSeconds", Number(event.target.value))}
+                        className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                      />
+                    </label>
+
+                    <label className="block text-sm text-zinc-300">
+                      Timeout (ms)
+                      <input
+                        type="number"
+                        min={1000}
+                        max={30000}
+                        value={form.timeoutMs}
+                        onChange={(event) => updateForm("timeoutMs", Number(event.target.value))}
+                        className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                      />
+                    </label>
+
+                    <label className="block text-sm text-zinc-300">
+                      Failure threshold
+                      <input
+                        type="number"
+                        min={1}
+                        max={10}
+                        value={form.failureThreshold}
+                        onChange={(event) => updateForm("failureThreshold", Number(event.target.value))}
+                        className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                      />
+                    </label>
+
+                    <label className="flex items-center justify-between rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-3 text-sm text-zinc-300">
+                      Enabled
+                      <input
+                        type="checkbox"
+                        checked={form.enabled}
+                        onChange={(event) => updateForm("enabled", event.target.checked)}
+                        className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-emerald-400"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="mt-5 flex gap-3">
+                    <button
+                      type="button"
+                      onClick={handleSubmit}
+                      className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-slate-950 transition hover:bg-emerald-400"
+                    >
+                      {editingId ? "Save monitor" : "Add monitor"}
+                    </button>
+                    {editingId ? (
+                      <button
+                        type="button"
+                        onClick={resetForm}
+                        className="rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-200"
+                      >
+                        Reset
+                      </button>
+                    ) : null}
                   </div>
                 </div>
 
@@ -297,6 +481,10 @@ export default function Home() {
 
                           <div className="mt-4 grid grid-cols-2 gap-3 text-sm text-zinc-300">
                             <div>
+                              <span className="text-zinc-500">Status</span>
+                              <div className="mt-1 text-zinc-100">{monitor.enabled ? "Enabled" : "Disabled"}</div>
+                            </div>
+                            <div>
                               <span className="text-zinc-500">Method</span>
                               <div className="mt-1 text-zinc-100">{monitor.method}</div>
                             </div>
@@ -305,13 +493,39 @@ export default function Home() {
                               <div className="mt-1 text-zinc-100">{monitor.intervalSeconds}s</div>
                             </div>
                             <div>
-                              <span className="text-zinc-500">Timeout</span>
-                              <div className="mt-1 text-zinc-100">{monitor.timeoutMs}ms</div>
-                            </div>
-                            <div>
-                              <span className="text-zinc-500">Status</span>
+                              <span className="text-zinc-500">Expected</span>
                               <div className="mt-1 text-zinc-100">{monitor.expectedStatusCode}</div>
                             </div>
+                            <div className="col-span-2">
+                              <span className="text-zinc-500">Last checked</span>
+                              <div className="mt-1 text-zinc-100">
+                                {monitor.lastCheckedAt ? new Date(monitor.lastCheckedAt).toLocaleString() : "Never checked"}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="mt-4 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleEnableToggle(monitor)}
+                              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100"
+                            >
+                              {monitor.enabled ? "Disable" : "Enable"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => beginEdit(monitor)}
+                              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100"
+                            >
+                              Edit
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDelete(monitor.id)}
+                              className="rounded-md border border-red-700 bg-red-950/30 px-3 py-2 text-sm text-red-200"
+                            >
+                              Delete
+                            </button>
                           </div>
                         </div>
                       ))}

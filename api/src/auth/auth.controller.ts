@@ -49,8 +49,9 @@ export class AuthController {
     const stateCookie = req.cookies?.sc_oauth_state;
     const stateParam = req.query.state;
     const code = req.query.code;
+    const stateValue = Array.isArray(stateParam) ? stateParam[0] ?? '' : typeof stateParam === 'string' ? stateParam : '';
 
-    if (!stateCookie || !stateParam || String(stateCookie) !== String(stateParam)) {
+    if (!stateCookie || !stateValue || String(stateCookie) !== stateValue) {
       this.authService.clearOauthStateCookie(res);
       return res.redirect(`${this.config.get<string>('WEB_URL') ?? 'http://localhost:3000'}?auth=error`);
     }

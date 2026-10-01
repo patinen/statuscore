@@ -1,27 +1,18 @@
 import { Transform, Type } from 'class-transformer';
-import {
-  IsBoolean,
-  IsIn,
-  IsInt,
-  IsOptional,
-  IsString,
-  IsUrl,
-  Length,
-  Max,
-  Min,
-} from 'class-validator';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, IsUrl, Length, Max, Min } from 'class-validator';
 
-const monitorMethods = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'];
+const monitorMethods = ['GET', 'HEAD'];
 
 export class CreateMonitorDto {
   @Transform(({ value }) => String(value).trim())
   @IsString()
-  @Length(1, 255)
+  @Length(1, 100)
   name: string;
 
   @Transform(({ value }) => String(value).trim())
   @IsString()
-  @IsUrl({ require_tld: false, protocols: ['http', 'https'] })
+  @Length(1, 2048)
+  @IsUrl({ require_tld: false, protocols: ['http', 'https'], require_protocol: true })
   url: string;
 
   @IsString()
@@ -36,14 +27,14 @@ export class CreateMonitorDto {
 
   @Type(() => Number)
   @IsInt()
-  @Min(15)
+  @Min(60)
   @Max(86400)
   intervalSeconds: number = 60;
 
   @Type(() => Number)
   @IsInt()
   @Min(1000)
-  @Max(60000)
+  @Max(30000)
   timeoutMs: number = 10000;
 
   @Type(() => Number)
@@ -52,22 +43,22 @@ export class CreateMonitorDto {
   @Max(10)
   failureThreshold: number = 3;
 
-  @IsOptional()
   @IsBoolean()
-  enabled?: boolean;
+  enabled: boolean = true;
 }
 
 export class UpdateMonitorDto {
   @IsOptional()
   @Transform(({ value }) => String(value).trim())
   @IsString()
-  @Length(1, 255)
+  @Length(1, 100)
   name?: string;
 
   @IsOptional()
   @Transform(({ value }) => String(value).trim())
   @IsString()
-  @IsUrl({ require_tld: false, protocols: ['http', 'https'] })
+  @Length(1, 2048)
+  @IsUrl({ require_tld: false, protocols: ['http', 'https'], require_protocol: true })
   url?: string;
 
   @IsOptional()
@@ -85,7 +76,7 @@ export class UpdateMonitorDto {
   @IsOptional()
   @Type(() => Number)
   @IsInt()
-  @Min(15)
+  @Min(60)
   @Max(86400)
   intervalSeconds?: number;
 
@@ -93,7 +84,7 @@ export class UpdateMonitorDto {
   @Type(() => Number)
   @IsInt()
   @Min(1000)
-  @Max(60000)
+  @Max(30000)
   timeoutMs?: number;
 
   @IsOptional()

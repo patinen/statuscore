@@ -1,5 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import type { Monitor, User } from '@prisma/client';
+import type { Monitor } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service.js';
 import type { SessionUser } from '../auth/auth.service.js';
 import { TargetUrlValidationService } from './ssrf-validation.service.js';
@@ -12,6 +12,10 @@ export class MonitorService {
     private readonly prisma: PrismaService,
     private readonly targetUrlValidationService: TargetUrlValidationService,
   ) {}
+
+  private nextCheckAtFor(enabled: boolean): Date | null {
+    return enabled ? new Date() : null;
+  }
 
   async listForUser(userId: string): Promise<Monitor[]> {
     return this.prisma.monitor.findMany({
@@ -32,8 +36,21 @@ export class MonitorService {
     return monitor;
   }
 
-  async createForUser(user: SessionUser, data: { name: string; url: string; method: string; expectedStatusCode: number; intervalSeconds: number; timeoutMs: number; failureThreshold: number; enabled?: boolean }): Promise<Monitor> {
+  async createForUser(
+    user: SessionUser,
+    data: {
+      name: string;
+      url: string;
+      method: string;
+      expectedStatusCode: number;
+      intervalSeconds: number;
+      timeoutMs: number;
+      failureThreshold: number;
+      enabled?: boolean;
+    },
+  ): Promise<Monitor> {
     const normalizedUrl = await this.targetUrlValidationService.validateAndNormalize(data.url);
+    const enabled = data.enabled ?? true;
 
     return this.prisma.monitor.create({
       data: {
@@ -45,17 +62,33 @@ export class MonitorService {
         intervalSeconds: data.intervalSeconds,
         timeoutMs: data.timeoutMs,
         failureThreshold: data.failureThreshold,
-        enabled: data.enabled ?? true,
+        enabled,
         currentStatus: 'UNKNOWN',
         consecutiveFailures: 0,
+        nextCheckAt: this.nextCheckAtFor(enabled),
       },
     });
   }
 
-  async updateForUser(userId: string, monitorId: string, data: Partial<{ name: string; url: string; method: string; expectedStatusCode: number; intervalSeconds: number; timeoutMs: number; failureThreshold: number; enabled: boolean }>): Promise<Monitor> {
-    await this.getForUser(userId, monitorId);
-
+  async updateForUser(
+    userId: string,
+    monitorId: string,
+    data: Partial<{
+      name: string;
+      url: string;
+      method: string;
+      expectedStatusCode: number;
+      intervalSeconds: number;
+      timeoutMs: number;
+      failureThreshold: number;
+      enabled: boolean;
+    }>,
+  ): Promise<Monitor> {
+    const existingMonitor = await this.getForUser(userId, monitorId);
     const nextUrl = data.url ? await this.targetUrlValidationService.validateAndNormalize(data.url) : undefined;
+
+    const shouldEnable = data.enabled ?? existingMonitor.enabled;
+    const nextCheckAt = data.enabled === undefined ? existingMonitor.nextCheckAt : this.nextCheckAtFor(shouldEnable);
 
     return this.prisma.monitor.update({
       where: { id: monitorId },
@@ -68,6 +101,7 @@ export class MonitorService {
         ...(data.timeoutMs !== undefined ? { timeoutMs: data.timeoutMs } : {}),
         ...(data.failureThreshold !== undefined ? { failureThreshold: data.failureThreshold } : {}),
         ...(data.enabled !== undefined ? { enabled: data.enabled } : {}),
+        ...(data.enabled !== undefined ? { nextCheckAt } : {}),
       },
     });
   }

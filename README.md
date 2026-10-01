@@ -1,10 +1,28 @@
 # StatusCore
 
-StatusCore is a self-hosted service monitoring and incident tracking application designed for teams that want visibility into uptime, response times, and failure patterns without depending on a SaaS provider.
+StatusCore is a self-hosted monitoring platform for checking the health of public services and exposing a simple dashboard for operations teams.
 
-## MVP goal
+## Phase 2 implemented
 
-The initial goal is to establish a solid foundation for a self-hosted monitoring platform: a Next.js frontend shell, a NestJS API, PostgreSQL persistence, and local development infrastructure. The first phase is intentionally limited to project scaffolding and database structure.
+This repository now includes the following features:
+
+- GitHub OAuth authentication
+- HttpOnly application session cookies
+- authenticated monitor CRUD
+- SSRF-aware target URL validation
+- PostgreSQL persistence via Prisma
+
+## Planned and not yet implemented
+
+The following capabilities are intentionally still planned for future phases and are not part of the current implementation:
+
+- actual HTTP monitoring
+- Redis/BullMQ processing
+- scheduler
+- monitoring worker
+- incident state machine
+- historical uptime and latency analytics
+- alerts
 
 ## Current stack
 
@@ -16,19 +34,6 @@ The initial goal is to establish a solid foundation for a self-hosted monitoring
 - Prisma
 - PostgreSQL
 - Docker Compose
-- Redis (for later BullMQ-based monitoring worker work)
-
-## Planned architecture
-
-Browser
-   |
-Next.js
-   |
-NestJS API
-   |
-PostgreSQL
-
-Redis and BullMQ will be introduced in a later phase, alongside a dedicated monitoring worker for scheduled checks and background processing.
 
 ## Repository structure
 
@@ -46,7 +51,8 @@ statuscore/
 │   ├── public/
 │   └── package.json
 ├── README.md
-└── .gitignore
+├── .gitignore
+└── .env.example (optional root config if used locally)
 ```
 
 ## Local development
@@ -88,8 +94,31 @@ cd api
 docker compose up -d
 ```
 
-This starts PostgreSQL 16 and Redis 7 for local development. The database schema is managed through Prisma and is not intended to represent production credentials or deployment configuration.
+This starts PostgreSQL 16 for local development. Redis remains a future dependency for the queue and worker layer.
+
+## Required environment variables
+
+### API (.env)
+
+```env
+NODE_ENV=development
+PORT=3001
+CORS_ORIGIN=http://localhost:3000
+WEB_URL=http://localhost:3000
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+GITHUB_CALLBACK_URL=http://localhost:3001/auth/github/callback
+AUTH_SESSION_SECRET=replace-with-a-long-random-secret
+DATABASE_URL=postgresql://statuscore:statuscore_dev_password@localhost:5432/statuscore_dev?schema=public
+REDIS_URL=redis://localhost:6379
+```
+
+### Web (.env.local)
+
+```env
+NEXT_PUBLIC_API_URL=http://localhost:3001
+```
 
 ## Notes
 
-This repository intentionally does not describe the later monitoring, notifications, authentication, or incident-management features as complete. These capabilities are planned for subsequent phases.
+The current implementation focuses on secure authenticated monitor management and safe target validation. It does not yet implement actual monitoring requests, scheduling, or alerting workflows.
