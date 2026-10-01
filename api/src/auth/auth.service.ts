@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../database/prisma.service.js';
 import { randomBytes } from 'node:crypto';
@@ -18,8 +18,8 @@ export interface GitHubProfile {
 @Injectable()
 export class AuthService {
   constructor(
-    private readonly config: ConfigService,
-    private readonly prisma: PrismaService,
+    @Inject(ConfigService) private readonly config: ConfigService,
+    @Inject(PrismaService) private readonly prisma: PrismaService,
   ) {}
 
   private isProduction(): boolean {

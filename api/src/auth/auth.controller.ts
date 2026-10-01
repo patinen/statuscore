@@ -3,6 +3,7 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Inject,
   Post,
   Req,
   Res,
@@ -18,9 +19,9 @@ import { PrismaService } from '../database/prisma.service.js';
 @Controller('auth')
 export class AuthController {
   constructor(
-    private readonly authService: AuthService,
-    private readonly config: ConfigService,
-    private readonly prisma: PrismaService,
+    @Inject(AuthService) private readonly authService: AuthService,
+    @Inject(ConfigService) private readonly config: ConfigService,
+    @Inject(PrismaService) private readonly prisma: PrismaService,
   ) {}
 
   @Get('github')

@@ -1,39 +1,104 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import type { Monitor } from '@prisma/client';
+import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import type { CheckResult, Monitor } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service.js';
 import type { SessionUser } from '../auth/auth.service.js';
 import { TargetUrlValidationService } from './ssrf-validation.service.js';
 
 export type MonitorRecord = Monitor;
 
+type MonitorWithLatestCheck = Monitor & {
+  checkResults: CheckResult[];
+};
+
 @Injectable()
 export class MonitorService {
   constructor(
-    private readonly prisma: PrismaService,
-    private readonly targetUrlValidationService: TargetUrlValidationService,
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(TargetUrlValidationService) private readonly targetUrlValidationService: TargetUrlValidationService,
   ) {}
 
   private nextCheckAtFor(enabled: boolean): Date | null {
     return enabled ? new Date() : null;
   }
 
-  async listForUser(userId: string): Promise<Monitor[]> {
-    return this.prisma.monitor.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'desc' },
-    });
+  private serializeMonitor(monitor: MonitorWithLatestCheck) {
+    const latestCheck = Array.isArray(monitor.checkResults) ? (monitor.checkResults[0] ?? null) : null;
+
+    return {
+      id: monitor.id,
+      userId: monitor.userId,
+      name: monitor.name,
+      url: monitor.url,
+      method: monitor.method,
+      expectedStatusCode: monitor.expectedStatusCode,
+      intervalSeconds: monitor.intervalSeconds,
+      timeoutMs: monitor.timeoutMs,
+      failureThreshold: monitor.failureThreshold,
+      enabled: monitor.enabled,
+      currentStatus: monitor.currentStatus,
+      consecutiveFailures: monitor.consecutiveFailures,
+      lastCheckedAt: monitor.lastCheckedAt,
+      nextCheckAt: monitor.nextCheckAt,
+      createdAt: monitor.createdAt,
+      updatedAt: monitor.updatedAt,
+      latestStatusCode: latestCheck?.statusCode ?? null,
+      latestResponseTimeMs: latestCheck?.responseTimeMs ?? null,
+      latestSuccess: latestCheck?.success ?? null,
+    };
   }
 
-  async getForUser(userId: string, monitorId: string): Promise<Monitor> {
+  async listForUser(userId: string) {
+    const monitors = await this.prisma.monitor.findMany({
+      where: { userId },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        checkResults: {
+          orderBy: { checkedAt: 'desc' },
+          take: 1,
+        },
+      },
+    });
+
+    return monitors.map((monitor) => this.serializeMonitor(monitor as MonitorWithLatestCheck));
+  }
+
+  async getForUser(userId: string, monitorId: string) {
     const monitor = await this.prisma.monitor.findFirst({
       where: { id: monitorId, userId },
+      include: {
+        checkResults: {
+          orderBy: { checkedAt: 'desc' },
+          take: 1,
+        },
+      },
     });
 
     if (!monitor) {
       throw new NotFoundException('Monitor not found.');
     }
 
-    return monitor;
+    return this.serializeMonitor(monitor as MonitorWithLatestCheck);
+  }
+
+  async getChecksForUser(userId: string, monitorId: string, limit = 50) {
+    await this.getForUser(userId, monitorId);
+
+    const safeLimit = Math.min(Math.max(limit, 1), 100);
+
+    return this.prisma.checkResult.findMany({
+      where: { monitorId },
+      orderBy: { checkedAt: 'desc' },
+      take: safeLimit,
+      select: {
+        id: true,
+        success: true,
+        statusCode: true,
+        responseTimeMs: true,
+        errorType: true,
+        errorMessage: true,
+        checkedAt: true,
+      },
+    });
   }
 
   async createForUser(
@@ -48,7 +113,13 @@ export class MonitorService {
       failureThreshold: number;
       enabled?: boolean;
     },
-  ): Promise<Monitor> {
+  ) {
+    const existingCount = await this.prisma.monitor.count?.({ where: { userId: user.id } }) ?? 0;
+
+    if (existingCount >= 50) {
+      throw new BadRequestException('Maximum of 50 monitors per user has been reached.');
+    }
+
     const normalizedUrl = await this.targetUrlValidationService.validateAndNormalize(data.url);
     const enabled = data.enabled ?? true;
 
@@ -83,7 +154,7 @@ export class MonitorService {
       failureThreshold: number;
       enabled: boolean;
     }>,
-  ): Promise<Monitor> {
+  ) {
     const existingMonitor = await this.getForUser(userId, monitorId);
     const nextUrl = data.url ? await this.targetUrlValidationService.validateAndNormalize(data.url) : undefined;
 

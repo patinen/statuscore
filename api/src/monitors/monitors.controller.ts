@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -28,6 +29,15 @@ export class MonitorsController {
   @Get(':id')
   getMonitor(@Req() req: Request & { user: SessionUser }, @Param('id') id: string) {
     return this.monitorsService.getForUser(req.user.id, id);
+  }
+
+  @Get(':id/checks')
+  getMonitorChecks(
+    @Req() req: Request & { user: SessionUser },
+    @Param('id') id: string,
+    @Query('limit') limit = '50',
+  ) {
+    return this.monitorsService.getChecksForUser(req.user.id, id, Number(limit));
   }
 
   @Post()
