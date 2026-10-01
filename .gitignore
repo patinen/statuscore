@@ -1,0 +1,28 @@
+# Node
+node_modules/
+.npm/
+
+# Build outputs
+.next/
+out/
+dist/
+coverage/
+
+# Env files
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs
+npm-debug.log*
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Prisma
+prisma/*.db
+prisma/*.db-journal

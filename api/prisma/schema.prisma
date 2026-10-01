@@ -1,0 +1,74 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(uuid()) @db.Uuid
+  githubId  String   @unique @db.VarChar(255)
+  login     String   @db.VarChar(255)
+  name      String?
+  avatarUrl String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  monitors Monitor[]
+}
+
+model Monitor {
+  id                  String    @id @default(uuid()) @db.Uuid
+  userId              String    @db.Uuid
+  name                String    @db.VarChar(255)
+  url                 String    @db.VarChar(2048)
+  method              String    @default("GET") @db.VarChar(16)
+  expectedStatusCode  Int       @default(200)
+  intervalSeconds     Int       @default(60)
+  timeoutMs           Int       @default(10000)
+  failureThreshold    Int       @default(3)
+  enabled             Boolean   @default(true)
+  currentStatus       String    @default("UNKNOWN") @db.VarChar(32)
+  consecutiveFailures Int       @default(0)
+  lastCheckedAt       DateTime?
+  nextCheckAt         DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  checkResults CheckResult[]
+  incidents   Incident[]
+
+  @@index([userId])
+  @@index([enabled, nextCheckAt])
+}
+
+model CheckResult {
+  id              String    @id @default(uuid()) @db.Uuid
+  monitorId       String    @db.Uuid
+  success         Boolean
+  statusCode      Int?
+  responseTimeMs  Int?
+  errorType       String?
+  errorMessage    String?
+  checkedAt       DateTime  @default(now())
+
+  monitor Monitor @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+
+  @@index([monitorId, checkedAt])
+}
+
+model Incident {
+  id         String    @id @default(uuid()) @db.Uuid
+  monitorId  String    @db.Uuid
+  startedAt  DateTime  @default(now())
+  resolvedAt DateTime?
+  reason     String?
+  lastError  String?
+
+  monitor Monitor @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+
+  @@index([monitorId, startedAt])
+}
