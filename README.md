@@ -34,11 +34,19 @@ Redis and BullMQ will be introduced in a later phase, alongside a dedicated moni
 
 ```text
 statuscore/
-├── web/
 ├── api/
+│   ├── .env.example
+│   ├── docker-compose.yml
+│   ├── prisma/
+│   ├── src/
+│   └── package.json
+├── web/
+│   ├── .env.example
+│   ├── app/
+│   ├── public/
+│   └── package.json
 ├── README.md
-├── .gitignore
-└── .env.example
+└── .gitignore
 ```
 
 ## Local development
