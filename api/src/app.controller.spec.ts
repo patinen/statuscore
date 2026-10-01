@@ -1,15 +1,28 @@
+import { Test, TestingModule } from '@nestjs/testing';
 import { AppController } from './app.controller.js';
+import { AppService } from './app.service.js';
 
 describe('AppController', () => {
   it('should expose the health endpoint payload', async () => {
-    const appController = new AppController();
-    const prisma = {
-      healthCheck: vi.fn().mockResolvedValue(true),
-    };
+    const app: TestingModule = await Test.createTestingModule({
+      controllers: [AppController],
+      providers: [
+        {
+          provide: AppService,
+          useValue: {
+            getHealth: vi.fn().mockResolvedValue({
+              status: 'ok',
+              service: 'statuscore-api',
+              database: 'connected',
+            }),
+          },
+        },
+      ],
+    }).compile();
 
-    appController['prisma'] = prisma as never;
+    const controller = app.get(AppController);
 
-    await expect(appController.getHealth()).resolves.toEqual({
+    await expect(controller.getHealth()).resolves.toEqual({
       status: 'ok',
       service: 'statuscore-api',
       database: 'connected',
