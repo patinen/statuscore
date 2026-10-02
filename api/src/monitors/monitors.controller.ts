@@ -59,6 +59,15 @@ export class MonitorsController {
     return this.monitorsService.getChecksForUser(req.user.id, id, limit);
   }
 
+  @Get(':id/incidents')
+  getMonitorIncidents(
+    @Req() req: Request & { user: SessionUser },
+    @Param('id') id: string,
+    @Query('limit', new DefaultValuePipe('20'), MonitorChecksLimitPipe) limit: number,
+  ) {
+    return this.monitorsService.getIncidentsForUser(req.user.id, id, limit);
+  }
+
   @Post()
   createMonitor(@Req() req: Request & { user: SessionUser }, @Body() dto: CreateMonitorDto) {
     return this.monitorsService.createForUser(req.user, dto);

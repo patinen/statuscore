@@ -2,9 +2,9 @@
 
 StatusCore is a self-hosted monitoring platform for public services, built around GitHub authentication, monitor management, and safe HTTP checks.
 
-## Phase 3 implemented
+## Phase 4 implemented
 
-This repository includes the following Phase 3 features:
+This repository includes the following Phase 4 features:
 
 - GitHub OAuth authentication with the minimum required profile scope
 - authenticated monitor CRUD
@@ -17,12 +17,14 @@ This repository includes the following Phase 3 features:
 - CheckResult history storage
 - automatic monitor state transitions
 - recent check history API and UI
+- incident lifecycle management with a single open incident per monitor
+- active incident visibility in monitor payloads and dashboard cards
+- incident history API for each monitor
 
 ## Planned and not yet implemented
 
-The following capabilities remain intentionally out of scope for the current Phase 3 work:
+The following capabilities remain intentionally out of scope for the current Phase 4 work:
 
-- incident lifecycle
 - alerts
 - uptime/latency analytics
 - charts

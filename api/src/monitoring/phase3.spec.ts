@@ -284,6 +284,11 @@ describe('MonitorExecutionService state transitions', () => {
     const tx = {
       checkResult: { create: vi.fn().mockResolvedValue(undefined) },
       monitor: { update: vi.fn().mockResolvedValue(undefined) },
+      incident: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
     };
 
     const prisma = {
@@ -320,6 +325,93 @@ describe('MonitorExecutionService state transitions', () => {
         data: expect.objectContaining({
           currentStatus: 'UP',
           consecutiveFailures: 0,
+        }),
+      }),
+    );
+  });
+
+  it('opens an incident when the failure threshold is crossed and resolves it on recovery', async () => {
+    const tx = {
+      checkResult: { create: vi.fn().mockResolvedValue(undefined) },
+      monitor: { update: vi.fn().mockResolvedValue(undefined) },
+      incident: {
+        findFirst: vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce({
+          id: 'incident-1',
+          monitorId: 'm1',
+          startedAt: new Date('2024-01-01T00:00:00Z'),
+          resolvedAt: null,
+          reason: 'Monitor failure threshold reached',
+          lastError: 'HTTP 500',
+        }),
+        create: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+
+    const prisma = {
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'UP',
+          consecutiveFailures: 2,
+          failureThreshold: 3,
+          url: 'https://example.com',
+          method: 'GET',
+          expectedStatusCode: 200,
+          timeoutMs: 1000,
+        }),
+      },
+      $transaction: vi.fn(async (callback) => callback(tx)),
+    };
+
+    const service = new MonitorExecutionService(prisma as never, {
+      executeCheck: vi.fn().mockResolvedValue({
+        success: false,
+        statusCode: 500,
+        responseTimeMs: 15,
+        errorType: 'UNEXPECTED_STATUS',
+        errorMessage: 'HTTP 500',
+      }),
+    } as never);
+
+    await service.processMonitorCheck('m1');
+
+    expect(tx.incident.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          monitorId: 'm1',
+          reason: 'Monitor failed 3 consecutive checks',
+        }),
+      }),
+    );
+
+    tx.incident.findFirst.mockResolvedValueOnce({
+      id: 'incident-1',
+      monitorId: 'm1',
+      startedAt: new Date('2024-01-01T00:00:00Z'),
+      resolvedAt: null,
+      reason: 'Monitor failed 3 consecutive checks',
+      lastError: 'HTTP 500',
+    });
+
+    const recoveryService = new MonitorExecutionService(prisma as never, {
+      executeCheck: vi.fn().mockResolvedValue({
+        success: true,
+        statusCode: 200,
+        responseTimeMs: 10,
+        errorType: null,
+        errorMessage: null,
+      }),
+    } as never);
+
+    await recoveryService.processMonitorCheck('m1');
+
+    expect(tx.incident.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ id: 'incident-1' }),
+        data: expect.objectContaining({
+          resolvedAt: expect.any(Date),
         }),
       }),
     );

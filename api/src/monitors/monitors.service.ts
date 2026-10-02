@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
-import type { CheckResult, Monitor } from '@prisma/client';
+import type { CheckResult, Incident, Monitor } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service.js';
 import type { SessionUser } from '../auth/auth.service.js';
 import { TargetUrlValidationService } from './ssrf-validation.service.js';
@@ -8,6 +8,7 @@ export type MonitorRecord = Monitor;
 
 type MonitorWithLatestCheck = Monitor & {
   checkResults: CheckResult[];
+  incidents: Incident[];
 };
 
 @Injectable()
@@ -23,6 +24,7 @@ export class MonitorService {
 
   private serializeMonitor(monitor: MonitorWithLatestCheck) {
     const latestCheck = Array.isArray(monitor.checkResults) ? (monitor.checkResults[0] ?? null) : null;
+    const activeIncident = Array.isArray(monitor.incidents) ? (monitor.incidents[0] ?? null) : null;
 
     return {
       id: monitor.id,
@@ -42,6 +44,16 @@ export class MonitorService {
       latestStatusCode: latestCheck?.statusCode ?? null,
       latestResponseTimeMs: latestCheck?.responseTimeMs ?? null,
       latestSuccess: latestCheck?.success ?? null,
+      activeIncident: activeIncident
+        ? {
+            id: activeIncident.id,
+            monitorId: activeIncident.monitorId,
+            startedAt: activeIncident.startedAt,
+            resolvedAt: activeIncident.resolvedAt,
+            reason: activeIncident.reason,
+            lastError: activeIncident.lastError,
+          }
+        : null,
     };
   }
 
@@ -52,6 +64,11 @@ export class MonitorService {
       include: {
         checkResults: {
           orderBy: { checkedAt: 'desc' },
+          take: 1,
+        },
+        incidents: {
+          where: { resolvedAt: null },
+          orderBy: { startedAt: 'desc' },
           take: 1,
         },
       },
@@ -66,6 +83,11 @@ export class MonitorService {
       include: {
         checkResults: {
           orderBy: { checkedAt: 'desc' },
+          take: 1,
+        },
+        incidents: {
+          where: { resolvedAt: null },
+          orderBy: { startedAt: 'desc' },
           take: 1,
         },
       },
@@ -95,6 +117,26 @@ export class MonitorService {
         errorType: true,
         errorMessage: true,
         checkedAt: true,
+      },
+    });
+  }
+
+  async getIncidentsForUser(userId: string, monitorId: string, limit = 20) {
+    await this.getForUser(userId, monitorId);
+
+    const safeLimit = Math.min(Math.max(limit, 1), 100);
+
+    return this.prisma.incident.findMany({
+      where: { monitorId },
+      orderBy: { startedAt: 'desc' },
+      take: safeLimit,
+      select: {
+        id: true,
+        monitorId: true,
+        startedAt: true,
+        resolvedAt: true,
+        reason: true,
+        lastError: true,
       },
     });
   }

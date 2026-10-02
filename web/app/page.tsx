@@ -9,6 +9,15 @@ type User = {
   avatarUrl: string | null;
 };
 
+type MonitorIncident = {
+  id: string;
+  monitorId: string;
+  startedAt: string;
+  resolvedAt: string | null;
+  reason: string | null;
+  lastError: string | null;
+};
+
 type Monitor = {
   id: string;
   name: string;
@@ -25,6 +34,7 @@ type Monitor = {
   latestStatusCode: number | null;
   latestResponseTimeMs: number | null;
   latestSuccess: boolean | null;
+  activeIncident: MonitorIncident | null;
 };
 
 type MonitorCheckHistoryItem = {
@@ -547,6 +557,23 @@ export default function Home() {
                               {monitor.currentStatus}
                             </span>
                           </div>
+
+                          {monitor.activeIncident ? (
+                            <div className="mt-4 rounded-md border border-red-700/60 bg-red-950/20 p-3 text-sm text-red-100">
+                              <div className="flex items-center justify-between gap-3">
+                                <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-red-300">
+                                  Active incident
+                                </span>
+                                <span className="text-[10px] text-red-200">
+                                  {new Date(monitor.activeIncident.startedAt).toLocaleString()}
+                                </span>
+                              </div>
+                              <div className="mt-2 font-medium text-red-50">{monitor.activeIncident.reason ?? "Service failure"}</div>
+                              {monitor.activeIncident.lastError ? (
+                                <div className="mt-1 text-xs text-red-200">Last error: {monitor.activeIncident.lastError}</div>
+                              ) : null}
+                            </div>
+                          ) : null}
 
                           <div className="mt-4 grid grid-cols-2 gap-3 text-sm text-zinc-300">
                             <div>

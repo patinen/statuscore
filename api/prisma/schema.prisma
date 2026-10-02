@@ -71,4 +71,5 @@ model Incident {
   monitor Monitor @relation(fields: [monitorId], references: [id], onDelete: Cascade)
 
   @@index([monitorId, startedAt])
+  @@index([monitorId, resolvedAt])
 }
