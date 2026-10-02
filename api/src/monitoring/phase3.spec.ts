@@ -238,7 +238,25 @@ describe('MonitorExecutionService state transitions', () => {
   it('failure threshold transitions monitor to DOWN', async () => {
     const tx = {
       checkResult: { create: vi.fn().mockResolvedValue(undefined) },
-      monitor: { update: vi.fn().mockResolvedValue(undefined) },
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'UP',
+          consecutiveFailures: 2,
+          failureThreshold: 3,
+          expectedStatusCode: 200,
+          url: 'https://example.com',
+          method: 'GET',
+          timeoutMs: 1000,
+        }),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+      incident: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
     };
 
     const prisma = {
@@ -283,7 +301,20 @@ describe('MonitorExecutionService state transitions', () => {
   it('success resets consecutiveFailures', async () => {
     const tx = {
       checkResult: { create: vi.fn().mockResolvedValue(undefined) },
-      monitor: { update: vi.fn().mockResolvedValue(undefined) },
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'UP',
+          consecutiveFailures: 4,
+          failureThreshold: 3,
+          expectedStatusCode: 200,
+          url: 'https://example.com',
+          method: 'GET',
+          timeoutMs: 1000,
+        }),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
       incident: {
         findFirst: vi.fn().mockResolvedValue(null),
         create: vi.fn().mockResolvedValue(undefined),
@@ -333,7 +364,20 @@ describe('MonitorExecutionService state transitions', () => {
   it('opens an incident when the failure threshold is crossed and resolves it on recovery', async () => {
     const tx = {
       checkResult: { create: vi.fn().mockResolvedValue(undefined) },
-      monitor: { update: vi.fn().mockResolvedValue(undefined) },
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'UP',
+          consecutiveFailures: 2,
+          failureThreshold: 3,
+          expectedStatusCode: 200,
+          url: 'https://example.com',
+          method: 'GET',
+          timeoutMs: 1000,
+        }),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
       incident: {
         findFirst: vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce({
           id: 'incident-1',
@@ -381,17 +425,29 @@ describe('MonitorExecutionService state transitions', () => {
       expect.objectContaining({
         data: expect.objectContaining({
           monitorId: 'm1',
-          reason: 'Monitor failed 3 consecutive checks',
+          reason: 'Expected HTTP 200 but received 500.',
         }),
       }),
     );
+
+    tx.monitor.findUnique.mockResolvedValueOnce({
+      id: 'm1',
+      enabled: true,
+      currentStatus: 'DOWN',
+      consecutiveFailures: 3,
+      failureThreshold: 3,
+      expectedStatusCode: 200,
+      url: 'https://example.com',
+      method: 'GET',
+      timeoutMs: 1000,
+    });
 
     tx.incident.findFirst.mockResolvedValueOnce({
       id: 'incident-1',
       monitorId: 'm1',
       startedAt: new Date('2024-01-01T00:00:00Z'),
       resolvedAt: null,
-      reason: 'Monitor failed 3 consecutive checks',
+      reason: 'Expected HTTP 200 but received 500.',
       lastError: 'HTTP 500',
     });
 
@@ -415,6 +471,258 @@ describe('MonitorExecutionService state transitions', () => {
         }),
       }),
     );
+  });
+});
+
+describe('Incident lifecycle and access rules', () => {
+  it('UNKNOWN failure below threshold does not open an incident', async () => {
+    const tx = {
+      checkResult: { create: vi.fn().mockResolvedValue(undefined) },
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'UNKNOWN',
+          consecutiveFailures: 0,
+          failureThreshold: 3,
+          expectedStatusCode: 200,
+          url: 'https://example.com',
+          method: 'GET',
+          timeoutMs: 1000,
+        }),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+      incident: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+
+    const prisma = {
+      monitor: { findUnique: vi.fn().mockResolvedValue({ id: 'm1', enabled: true, currentStatus: 'UNKNOWN', consecutiveFailures: 0, failureThreshold: 3, expectedStatusCode: 200, url: 'https://example.com', method: 'GET', timeoutMs: 1000 }) },
+      $transaction: vi.fn(async (callback) => callback(tx)),
+    };
+
+    const service = new MonitorExecutionService(prisma as never, {
+      executeCheck: vi.fn().mockResolvedValue({ success: false, statusCode: 500, responseTimeMs: 10, errorType: 'UNEXPECTED_STATUS', errorMessage: 'Unexpected status code 500.' }),
+    } as never);
+
+    await service.processMonitorCheck('m1');
+
+    expect(tx.incident.create).not.toHaveBeenCalled();
+  });
+
+  it('UNKNOWN threshold reached opens an incident', async () => {
+    const tx = {
+      checkResult: { create: vi.fn().mockResolvedValue(undefined) },
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'UNKNOWN',
+          consecutiveFailures: 2,
+          failureThreshold: 3,
+          expectedStatusCode: 200,
+          url: 'https://example.com',
+          method: 'GET',
+          timeoutMs: 1000,
+        }),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+      incident: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+
+    const prisma = {
+      monitor: { findUnique: vi.fn().mockResolvedValue({ id: 'm1', enabled: true, currentStatus: 'UNKNOWN', consecutiveFailures: 2, failureThreshold: 3, expectedStatusCode: 200, url: 'https://example.com', method: 'GET', timeoutMs: 1000 }) },
+      $transaction: vi.fn(async (callback) => callback(tx)),
+    };
+
+    const service = new MonitorExecutionService(prisma as never, {
+      executeCheck: vi.fn().mockResolvedValue({ success: false, statusCode: 500, responseTimeMs: 10, errorType: 'UNEXPECTED_STATUS', errorMessage: 'Unexpected status code 500.' }),
+    } as never);
+
+    await service.processMonitorCheck('m1');
+
+    expect(tx.incident.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('DOWN failure updates open incident without creating a duplicate', async () => {
+    const tx = {
+      checkResult: { create: vi.fn().mockResolvedValue(undefined) },
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'DOWN',
+          consecutiveFailures: 5,
+          failureThreshold: 3,
+          expectedStatusCode: 200,
+          url: 'https://example.com',
+          method: 'GET',
+          timeoutMs: 1000,
+        }),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+      incident: {
+        findFirst: vi.fn().mockResolvedValue({ id: 'incident-1', monitorId: 'm1', startedAt: new Date(), resolvedAt: null, reason: 'Expected HTTP 200 but received 500.', lastError: 'Unexpected status code 500.' }),
+        create: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+
+    const prisma = {
+      monitor: { findUnique: vi.fn().mockResolvedValue({ id: 'm1', enabled: true, currentStatus: 'DOWN', consecutiveFailures: 5, failureThreshold: 3, expectedStatusCode: 200, url: 'https://example.com', method: 'GET', timeoutMs: 1000 }) },
+      $transaction: vi.fn(async (callback) => callback(tx)),
+    };
+
+    const service = new MonitorExecutionService(prisma as never, {
+      executeCheck: vi.fn().mockResolvedValue({ success: false, statusCode: 500, responseTimeMs: 10, errorType: 'UNEXPECTED_STATUS', errorMessage: 'Unexpected status code 500.' }),
+    } as never);
+
+    await service.processMonitorCheck('m1');
+
+    expect(tx.incident.create).not.toHaveBeenCalled();
+    expect(tx.incident.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'incident-1' } }),
+    );
+  });
+
+  it('DOWN success resolves the open incident', async () => {
+    const tx = {
+      checkResult: { create: vi.fn().mockResolvedValue(undefined) },
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'DOWN',
+          consecutiveFailures: 4,
+          failureThreshold: 3,
+          expectedStatusCode: 200,
+          url: 'https://example.com',
+          method: 'GET',
+          timeoutMs: 1000,
+        }),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+      incident: {
+        findFirst: vi.fn().mockResolvedValue({ id: 'incident-1', monitorId: 'm1', startedAt: new Date(), resolvedAt: null, reason: 'Expected HTTP 200 but received 500.', lastError: 'Unexpected status code 500.' }),
+        create: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+
+    const prisma = {
+      monitor: { findUnique: vi.fn().mockResolvedValue({ id: 'm1', enabled: true, currentStatus: 'DOWN', consecutiveFailures: 4, failureThreshold: 3, expectedStatusCode: 200, url: 'https://example.com', method: 'GET', timeoutMs: 1000 }) },
+      $transaction: vi.fn(async (callback) => callback(tx)),
+    };
+
+    const service = new MonitorExecutionService(prisma as never, {
+      executeCheck: vi.fn().mockResolvedValue({ success: true, statusCode: 200, responseTimeMs: 10, errorType: null, errorMessage: null }),
+    } as never);
+
+    await service.processMonitorCheck('m1');
+
+    expect(tx.incident.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'incident-1' },
+        data: expect.objectContaining({ resolvedAt: expect.any(Date) }),
+      }),
+    );
+  });
+
+  it('retries a serializable conflict before succeeding', async () => {
+    const tx = {
+      checkResult: { create: vi.fn().mockResolvedValue(undefined) },
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'UP',
+          consecutiveFailures: 2,
+          failureThreshold: 3,
+          expectedStatusCode: 200,
+          url: 'https://example.com',
+          method: 'GET',
+          timeoutMs: 1000,
+        }),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+      incident: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+
+    const prisma = {
+      monitor: { findUnique: vi.fn().mockResolvedValue({ id: 'm1', enabled: true, currentStatus: 'UP', consecutiveFailures: 2, failureThreshold: 3, expectedStatusCode: 200, url: 'https://example.com', method: 'GET', timeoutMs: 1000 }) },
+      $transaction: vi.fn()
+        .mockRejectedValueOnce(Object.assign(new Error('serialization failure'), { code: 'P2034' }))
+        .mockImplementationOnce(async (callback) => callback(tx)),
+    };
+
+    const service = new MonitorExecutionService(prisma as never, {
+      executeCheck: vi.fn().mockResolvedValue({ success: false, statusCode: 500, responseTimeMs: 10, errorType: 'UNEXPECTED_STATUS', errorMessage: 'Unexpected status code 500.' }),
+    } as never);
+
+    await service.processMonitorCheck('m1');
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(tx.incident.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('GET /incidents only returns the current user and allows open/resolved filters', async () => {
+    const prisma = {
+      incident: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: 'inc-1',
+            monitorId: 'm1',
+            monitor: { name: 'API A' },
+            startedAt: new Date('2024-01-01T00:00:00Z'),
+            resolvedAt: new Date('2024-01-01T00:02:00Z'),
+            reason: 'Expected HTTP 200 but received 500.',
+            lastError: 'Unexpected status code 500.',
+          },
+          {
+            id: 'inc-2',
+            monitorId: 'm2',
+            monitor: { name: 'API B' },
+            startedAt: new Date('2024-01-01T00:00:00Z'),
+            resolvedAt: null,
+            reason: 'Request timed out.',
+            lastError: 'Timeout',
+          },
+        ]),
+      },
+    };
+
+    const service = new (await import('../incidents/incidents.service.js')).IncidentsService(prisma as never);
+
+    await expect(service.listForUser('u1', 'all', 50)).resolves.toHaveLength(2);
+    await expect(service.listForUser('u1', 'open', 50)).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'inc-2', monitorName: 'API B' }),
+      ]),
+    );
+    await expect(service.listForUser('u1', 'resolved', 50)).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'inc-1', monitorName: 'API A' }),
+      ]),
+    );
+  });
+
+  it('rejects invalid incident status or limit values', async () => {
+    const { IncidentsService } = await import('../incidents/incidents.service.js');
+
+    expect(() => IncidentsService.validateStatus('pending')).toThrow();
+    expect(() => IncidentsService.validateLimit('0', 50)).toThrow();
+    expect(() => IncidentsService.validateLimit('abc', 50)).toThrow();
   });
 });
 

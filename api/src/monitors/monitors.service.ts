@@ -47,9 +47,7 @@ export class MonitorService {
       activeIncident: activeIncident
         ? {
             id: activeIncident.id,
-            monitorId: activeIncident.monitorId,
             startedAt: activeIncident.startedAt,
-            resolvedAt: activeIncident.resolvedAt,
             reason: activeIncident.reason,
             lastError: activeIncident.lastError,
           }
@@ -126,7 +124,7 @@ export class MonitorService {
 
     const safeLimit = Math.min(Math.max(limit, 1), 100);
 
-    return this.prisma.incident.findMany({
+    const incidents = await this.prisma.incident.findMany({
       where: { monitorId },
       orderBy: { startedAt: 'desc' },
       take: safeLimit,
@@ -139,6 +137,13 @@ export class MonitorService {
         lastError: true,
       },
     });
+
+    return incidents.map((incident) => ({
+      ...incident,
+      durationMs: incident.resolvedAt
+        ? incident.resolvedAt.getTime() - incident.startedAt.getTime()
+        : Date.now() - incident.startedAt.getTime(),
+    }));
   }
 
   async createForUser(

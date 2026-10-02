@@ -5,6 +5,7 @@ import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AuthModule } from './auth/auth.module.js';
 import { DatabaseModule } from './database/database.module.js';
+import { IncidentsModule } from './incidents/incidents.module.js';
 import { MonitoringModule } from './monitoring/monitoring.module.js';
 import { MonitoringSchedulerModule } from './monitoring/monitoring-scheduler.module.js';
 import { MonitorsModule } from './monitors/monitors.module.js';
@@ -19,6 +20,7 @@ import { MonitorsModule } from './monitors/monitors.module.js';
     DatabaseModule,
     AuthModule,
     MonitorsModule,
+    IncidentsModule,
     MonitoringModule,
     MonitoringSchedulerModule,
   ],

@@ -35,6 +35,23 @@ class MonitorChecksLimitPipe {
   }
 }
 
+class MonitorIncidentsLimitPipe {
+  transform(value: string | undefined) {
+    const raw = value ?? '20';
+    if (!/^\d+$/.test(raw)) {
+      throw new BadRequestException('limit must be an integer between 1 and 100.');
+    }
+
+    const parsed = Number(raw);
+
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+      throw new BadRequestException('limit must be an integer between 1 and 100.');
+    }
+
+    return parsed;
+  }
+}
+
 @Controller('monitors')
 @UseGuards(AuthGuard)
 export class MonitorsController {
@@ -63,7 +80,7 @@ export class MonitorsController {
   getMonitorIncidents(
     @Req() req: Request & { user: SessionUser },
     @Param('id') id: string,
-    @Query('limit', new DefaultValuePipe('20'), MonitorChecksLimitPipe) limit: number,
+    @Query('limit', new DefaultValuePipe('20'), MonitorIncidentsLimitPipe) limit: number,
   ) {
     return this.monitorsService.getIncidentsForUser(req.user.id, id, limit);
   }

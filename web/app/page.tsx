@@ -47,6 +47,19 @@ type MonitorCheckHistoryItem = {
   errorMessage: string | null;
 };
 
+type IncidentStatus = "all" | "open" | "resolved";
+
+type IncidentRecord = {
+  id: string;
+  monitorId: string;
+  monitorName: string;
+  startedAt: string;
+  resolvedAt: string | null;
+  reason: string | null;
+  lastError: string | null;
+  durationMs: number;
+};
+
 type MonitorForm = {
   name: string;
   url: string;
@@ -99,9 +112,37 @@ const StatusBadge = ({ label }: { label: string }) => (
   </span>
 );
 
+const formatDuration = (durationMs: number) => {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (days > 0) {
+    const dayText = `${days}d`;
+    const hourText = hours > 0 ? ` ${hours}h` : "";
+    return `${dayText}${hourText}`;
+  }
+
+  if (hours > 0) {
+    const minuteText = minutes > 0 ? ` ${minutes}m` : "";
+    return `${hours}h${minuteText}`;
+  }
+
+  if (minutes > 0) {
+    const secondText = seconds > 0 ? ` ${seconds}s` : "";
+    return `${minutes}m${secondText}`;
+  }
+
+  return `${seconds}s`;
+};
+
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [monitors, setMonitors] = useState<Monitor[]>([]);
+  const [incidents, setIncidents] = useState<IncidentRecord[]>([]);
+  const [incidentFilter, setIncidentFilter] = useState<IncidentStatus>("all");
   const [recentChecks, setRecentChecks] = useState<Record<string, MonitorCheckHistoryItem[]>>({});
   const [isLoadingChecks, setIsLoadingChecks] = useState<Record<string, boolean>>({});
   const [expandedMonitorId, setExpandedMonitorId] = useState<string | null>(null);
@@ -159,30 +200,35 @@ export default function Home() {
 
     let cancelled = false;
 
-    const loadMonitors = async () => {
+    const loadDashboard = async () => {
       try {
-        const list = await apiRequest<Monitor[]>("/monitors");
+        const [list, incidentList] = await Promise.all([
+          apiRequest<Monitor[]>('/monitors'),
+          apiRequest<IncidentRecord[]>(`/incidents?status=${incidentFilter}&limit=50`),
+        ]);
+
         if (!cancelled) {
           setMonitors(list ?? []);
+          setIncidents(incidentList ?? []);
           setError(null);
         }
       } catch (pollError) {
         if (!cancelled) {
-          setError(pollError instanceof Error ? pollError.message : "Unable to refresh monitors.");
+          setError(pollError instanceof Error ? pollError.message : "Unable to refresh dashboard data.");
         }
       }
     };
 
-    void loadMonitors();
+    void loadDashboard();
     const intervalId = setInterval(() => {
-      void loadMonitors();
+      void loadDashboard();
     }, 30000);
 
     return () => {
       cancelled = true;
       clearInterval(intervalId);
     };
-  }, [user]);
+  }, [user, incidentFilter]);
 
   const resetForm = () => {
     setForm(defaultForm);
@@ -202,6 +248,7 @@ export default function Home() {
       await apiRequest<void>("/auth/logout", { method: "POST" });
       setUser(null);
       setMonitors([]);
+      setIncidents([]);
       resetForm();
     } catch (logoutError) {
       setError(logoutError instanceof Error ? logoutError.message : "Unable to log out.");
@@ -524,7 +571,63 @@ export default function Home() {
                   </div>
                 ) : null}
 
-                <div className="space-y-4">
+                <div className="space-y-6">
+                  <div className="rounded-lg border border-zinc-700 bg-zinc-950/40 p-5">
+                    <div className="mb-4 flex items-center justify-between gap-3">
+                      <h2 className="text-xl font-medium text-zinc-50">Incidents</h2>
+                      <div className="flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900 p-1">
+                        {(['all', 'open', 'resolved'] as IncidentStatus[]).map((status) => (
+                          <button
+                            key={status}
+                            type="button"
+                            onClick={() => setIncidentFilter(status)}
+                            className={[
+                              'rounded-full px-3 py-1.5 text-xs font-medium uppercase tracking-[0.15em] transition',
+                              incidentFilter === status
+                                ? 'bg-red-500 text-slate-950'
+                                : 'text-zinc-300 hover:text-zinc-100',
+                            ].join(' ')}
+                          >
+                            {status}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {incidents.length === 0 ? (
+                      <div className="text-sm text-zinc-400">No incidents match the selected filter.</div>
+                    ) : (
+                      <div className="space-y-3">
+                        {incidents.map((incident) => (
+                          <div key={incident.id} className="rounded-md border border-zinc-700 bg-zinc-950/70 p-3">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                              <div className="text-sm font-medium text-zinc-100">{incident.monitorName}</div>
+                              <span
+                                className={[
+                                  'inline-flex w-fit rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.2em]',
+                                  incident.resolvedAt
+                                    ? 'border border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
+                                    : 'border border-red-500/50 bg-red-500/10 text-red-300',
+                                ].join(' ')}
+                              >
+                                {incident.resolvedAt ? 'Resolved' : 'Open'}
+                              </span>
+                            </div>
+                            <div className="mt-2 text-sm text-zinc-200">{incident.reason ?? 'Monitoring check failed.'}</div>
+                            <div className="mt-3 flex flex-wrap gap-3 text-xs text-zinc-400">
+                              <span>Started: {new Date(incident.startedAt).toLocaleString()}</span>
+                              {incident.resolvedAt ? <span>Resolved: {new Date(incident.resolvedAt).toLocaleString()}</span> : null}
+                              <span>Duration: {formatDuration(incident.durationMs)}</span>
+                            </div>
+                            {incident.lastError ? (
+                              <div className="mt-2 text-xs text-zinc-300">Last error: {incident.lastError}</div>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
                   <div className="flex items-center justify-between gap-3">
                     <h2 className="text-xl font-medium text-zinc-50">Monitors</h2>
                     <p className="text-xs text-zinc-400">Checks run automatically in the background. Dashboard data may take a short time to update.</p>
