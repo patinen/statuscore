@@ -33,7 +33,7 @@ export class TargetUrlValidationService {
       throw new BadRequestException('Credentials are not allowed in target URLs.');
     }
 
-    const hostname = url.hostname.replace(/^\[|\]$/g, '');
+    const hostname = this.normalizeHostname(url.hostname);
 
     if (this.isLocalhostReference(hostname)) {
       throw new BadRequestException('Localhost and internal network targets are not allowed.');
@@ -44,23 +44,32 @@ export class TargetUrlValidationService {
         throw new BadRequestException('Only public routable IP addresses are allowed as targets.');
       }
 
-      return url.toString();
+      return this.toCanonicalUrl(url, hostname);
     }
 
-    const resolver = this.dnsResolver ?? ({ lookup: async () => [] as Array<{ address: string }> } as DnsResolverService);
-    const lookups = await resolver.lookup(url.hostname, { all: true, verbatim: true }).catch(() => [] as Array<{ address: string }>);
+    const lookups = await this.dnsResolver.lookup(hostname, { all: true, verbatim: true }).catch(() => [] as Array<{ address: string }>);
 
     if (lookups.length === 0) {
       throw new BadRequestException('Target hostname could not be resolved to a usable public IP address.');
     }
 
-    for (const entry of lookups) {
-      if (this.targetAddressService.isBlockedAddress(entry.address)) {
-        throw new BadRequestException('Target hostname resolves to a blocked internal or local address.');
-      }
+    const blocked = lookups.some((entry) => this.targetAddressService.isBlockedAddress(this.normalizeHostname(entry.address)));
+
+    if (blocked) {
+      throw new BadRequestException('Target hostname resolves to a blocked internal or local address.');
     }
 
-    return url.toString();
+    return this.toCanonicalUrl(url, hostname);
+  }
+
+  private normalizeHostname(hostname: string): string {
+    return hostname.trim().replace(/^\[|\]$/g, '');
+  }
+
+  private toCanonicalUrl(url: URL, hostname: string): string {
+    const normalized = new URL(url.toString());
+    normalized.hostname = hostname;
+    return normalized.toString();
   }
 
   private isLocalhostReference(hostname: string): boolean {
@@ -70,7 +79,7 @@ export class TargetUrlValidationService {
       return true;
     }
 
-    if (normalized === '::1' || normalized === '[::1]') {
+    if (normalized === '::1') {
       return true;
     }
 

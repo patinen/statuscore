@@ -64,14 +64,8 @@ export class MonitorExecutionService {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unexpected infrastructure failure';
-      this.logger.error(`Worker processing failed for monitor ${monitorId}: ${message}`);
-      await this.prisma.monitor.update({
-        where: { id: monitorId },
-        data: {
-          lastCheckedAt: new Date(),
-          currentStatus: 'UNKNOWN',
-        },
-      });
+      this.logger.error(`Infrastructure error processing monitor ${monitorId}: ${message}`);
+      throw error;
     }
   }
 

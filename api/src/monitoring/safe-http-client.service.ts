@@ -33,27 +33,42 @@ export class SafeHttpClientService {
   ) {}
 
   async executeCheck(request: HttpMonitorCheckRequest): Promise<HttpMonitorCheckResult> {
-    return this.checkUrl(request.url, request.method, request.expectedStatusCode, request.timeoutMs, 0);
+    try {
+      const normalizedUrl = await this.targetUrlValidationService.validateAndNormalize(request.url);
+      const parsedUrl = new URL(normalizedUrl);
+      const selectedAddress = await this.getValidatedAddress(parsedUrl.hostname);
+      return this.checkUrl(parsedUrl, selectedAddress, request.method, request.expectedStatusCode, request.timeoutMs, 0);
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        return {
+          success: false,
+          statusCode: null,
+          responseTimeMs: 0,
+          errorType: 'INVALID_TARGET',
+          errorMessage: error.message,
+        };
+      }
+
+      throw error;
+    }
   }
 
   private async checkUrl(
-    url: string,
+    parsedUrl: URL,
+    selectedAddress: string,
     method: HttpMethod,
     expectedStatusCode: number,
     timeoutMs: number,
     redirectDepth: number,
   ): Promise<HttpMonitorCheckResult> {
-    const parsedUrl = new URL(await this.targetUrlValidationService.validateAndNormalize(url));
-    const selectedAddress = await this.getValidatedAddress(parsedUrl.hostname);
     const requestFactory = parsedUrl.protocol === 'https:' ? httpsRequest : httpRequest;
-
     const startedAt = performance.now();
 
     return new Promise((resolve) => {
       const req = requestFactory(
         {
           protocol: parsedUrl.protocol,
-          hostname: parsedUrl.hostname,
+          hostname: selectedAddress,
           port: parsedUrl.port || (parsedUrl.protocol === 'https:' ? '443' : '80'),
           path: `${parsedUrl.pathname}${parsedUrl.search}`,
           method,
@@ -74,26 +89,29 @@ export class SafeHttpClientService {
           const statusCode = response.statusCode ?? 0;
           const responseTimeMs = Math.max(0, Math.round(performance.now() - startedAt));
 
-          if (redirectDepth >= 5 && [301, 302, 303, 307, 308].includes(statusCode)) {
-            response.resume();
-            resolve({
-              success: false,
-              statusCode,
-              responseTimeMs,
-              errorType: 'TOO_MANY_REDIRECTS',
-              errorMessage: 'Too many redirects encountered.',
-            });
-            return;
-          }
-
           if ([301, 302, 303, 307, 308].includes(statusCode) && response.headers.location) {
+            if (redirectDepth >= 5) {
+              response.resume();
+              resolve({
+                success: false,
+                statusCode,
+                responseTimeMs,
+                errorType: 'TOO_MANY_REDIRECTS',
+                errorMessage: 'Too many redirects encountered.',
+              });
+              return;
+            }
+
             response.resume();
-            response.on('end', async () => {
-              try {
-                const redirectLocation = new URL(String(response.headers.location), parsedUrl).toString();
-                const next = await this.checkUrl(redirectLocation, method, expectedStatusCode, timeoutMs, redirectDepth + 1);
-                resolve(next);
-              } catch {
+            const redirectTarget = new URL(String(response.headers.location), parsedUrl).toString();
+            void this.executeCheck({
+              url: redirectTarget,
+              method,
+              expectedStatusCode,
+              timeoutMs,
+            })
+              .then((next) => resolve(next))
+              .catch(() => {
                 resolve({
                   success: false,
                   statusCode,
@@ -101,8 +119,7 @@ export class SafeHttpClientService {
                   errorType: 'INVALID_TARGET',
                   errorMessage: 'Redirect target is invalid or blocked.',
                 });
-              }
-            });
+              });
             return;
           }
 
@@ -144,15 +161,17 @@ export class SafeHttpClientService {
   }
 
   private async getValidatedAddress(hostname: string): Promise<string> {
-    if (isIP(hostname)) {
-      if (this.targetAddressService.isBlockedAddress(hostname)) {
+    const normalizedHostname = hostname.replace(/^\[|\]$/g, '');
+
+    if (isIP(normalizedHostname)) {
+      if (this.targetAddressService.isBlockedAddress(normalizedHostname)) {
         throw new BadRequestException('Literal IP addresses must be public and routable.');
       }
 
-      return this.targetAddressService.normalizeAddress(hostname);
+      return this.targetAddressService.normalizeAddress(normalizedHostname);
     }
 
-    const results = await this.dnsResolver.lookup(hostname, { all: true, verbatim: true }).catch(() => []);
+    const results = await this.dnsResolver.lookup(normalizedHostname, { all: true, verbatim: true }).catch(() => [] as Array<{ address: string }>);
 
     if (results.length === 0) {
       throw new BadRequestException('Target hostname did not resolve to any usable public IP addresses.');
@@ -170,24 +189,20 @@ export class SafeHttpClientService {
   private classifyError(message: string, name: string, code?: string): string {
     const safeMessage = message.toUpperCase();
 
-    if (safeMessage.includes('TIMEOUT') || safeMessage.includes('ECONNRESET') || code === 'ETIMEDOUT') {
+    if (safeMessage.includes('TIMEOUT') || safeMessage.includes('ECONNRESET') || code === 'ETIMEDOUT' || name === 'AbortError') {
       return 'TIMEOUT';
     }
 
-    if (safeMessage.includes('ENOTFOUND') || safeMessage.includes('EAI_AGAIN')) {
+    if (safeMessage.includes('ENOTFOUND') || safeMessage.includes('EAI_AGAIN') || code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
       return 'DNS_ERROR';
     }
 
-    if (safeMessage.includes('CERT') || safeMessage.includes('TLS')) {
+    if (safeMessage.includes('CERT') || safeMessage.includes('TLS') || safeMessage.includes('SELF_SIGNED')) {
       return 'TLS_ERROR';
     }
 
-    if (safeMessage.includes('ECONNREFUSED') || safeMessage.includes('ECONNABORTED') || safeMessage.includes('ECONNRESET')) {
+    if (safeMessage.includes('ECONNREFUSED') || safeMessage.includes('ECONNABORTED') || safeMessage.includes('ECONNRESET') || code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'ECONNABORTED') {
       return 'CONNECTION_ERROR';
-    }
-
-    if (name === 'AbortError') {
-      return 'TIMEOUT';
     }
 
     return 'UNKNOWN_ERROR';
@@ -210,10 +225,6 @@ export class SafeHttpClientService {
       return 'Connection failed.';
     }
 
-    if (errorType === 'UNKNOWN_ERROR') {
-      return rawMessage.length > 160 ? `${rawMessage.slice(0, 157)}...` : rawMessage;
-    }
-
-    return rawMessage;
+    return rawMessage.length > 160 ? `${rawMessage.slice(0, 157)}...` : rawMessage;
   }
 }

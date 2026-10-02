@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Queue, type JobsOptions } from 'bullmq';
 
@@ -10,13 +10,12 @@ export interface MonitorCheckJobData {
 }
 
 @Injectable()
-export class MonitoringQueueService {
+export class MonitoringQueueService implements OnModuleDestroy {
   private readonly logger = new Logger(MonitoringQueueService.name);
   private readonly queue: Queue<MonitorCheckJobData>;
 
-  constructor(@Inject(ConfigService) private readonly config?: ConfigService) {
-    const runtimeConfig = this.config ?? new ConfigService();
-    const redisUrl = runtimeConfig.get<string>('REDIS_URL', 'redis://localhost:6379');
+  constructor(@Inject(ConfigService) private readonly config: ConfigService) {
+    const redisUrl = this.config.get<string>('REDIS_URL', 'redis://localhost:6379');
 
     this.queue = new Queue<MonitorCheckJobData>(MONITOR_CHECK_QUEUE, {
       connection: { url: redisUrl },
@@ -42,6 +41,10 @@ export class MonitoringQueueService {
 
     await this.queue.add('check', { monitorId, scheduledFor: scheduledFor.toISOString() }, jobOptions);
     this.logger.debug(`Queued monitor check for monitor ${monitorId} at ${scheduledFor.toISOString()}`);
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.close();
   }
 
   async close(): Promise<void> {

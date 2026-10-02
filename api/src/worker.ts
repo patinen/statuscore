@@ -10,17 +10,23 @@ async function bootstrap() {
 
   const shutdown = async (signal: string) => {
     logger.log(`Received ${signal}, shutting down monitoring worker.`);
+    process.removeListener('SIGINT', onSigint);
+    process.removeListener('SIGTERM', onSigterm);
     await app.close();
+    logger.log('Monitoring worker shutdown complete.');
     process.exit(0);
   };
 
-  process.on('SIGINT', () => {
+  const onSigint = () => {
     void shutdown('SIGINT');
-  });
+  };
 
-  process.on('SIGTERM', () => {
+  const onSigterm = () => {
     void shutdown('SIGTERM');
-  });
+  };
+
+  process.on('SIGINT', onSigint);
+  process.on('SIGTERM', onSigterm);
 }
 
 void bootstrap();

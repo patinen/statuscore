@@ -3,8 +3,12 @@ import * as ipaddr from 'ipaddr.js';
 
 @Injectable()
 export class TargetAddressService {
+  private normalizeInput(address: string): string {
+    return address.trim().replace(/^\[|\]$/g, '');
+  }
+
   isBlockedAddress(address: string): boolean {
-    const normalized = address.trim();
+    const normalized = this.normalizeInput(address);
 
     if (!normalized) {
       return true;
@@ -23,7 +27,8 @@ export class TargetAddressService {
   }
 
   normalizeAddress(address: string): string {
-    const parsed = ipaddr.parse(address);
+    const normalized = this.normalizeInput(address);
+    const parsed = ipaddr.parse(normalized);
 
     if (parsed.kind() === 'ipv6') {
       const ipv6 = parsed as ipaddr.IPv6;
