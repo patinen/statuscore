@@ -20,7 +20,21 @@ type Monitor = {
   intervalSeconds: number;
   timeoutMs: number;
   failureThreshold: number;
+  consecutiveFailures: number;
   lastCheckedAt: string | null;
+  latestStatusCode: number | null;
+  latestResponseTimeMs: number | null;
+  latestSuccess: boolean | null;
+};
+
+type MonitorCheckHistoryItem = {
+  id: string;
+  checkedAt: string;
+  success: boolean;
+  statusCode: number | null;
+  responseTimeMs: number | null;
+  errorType: string | null;
+  errorMessage: string | null;
 };
 
 type MonitorForm = {
@@ -78,6 +92,9 @@ const StatusBadge = ({ label }: { label: string }) => (
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [monitors, setMonitors] = useState<Monitor[]>([]);
+  const [recentChecks, setRecentChecks] = useState<Record<string, MonitorCheckHistoryItem[]>>({});
+  const [isLoadingChecks, setIsLoadingChecks] = useState<Record<string, boolean>>({});
+  const [expandedMonitorId, setExpandedMonitorId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [form, setForm] = useState<MonitorForm>(defaultForm);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -124,6 +141,38 @@ export default function Home() {
       isActive = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!user) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const loadMonitors = async () => {
+      try {
+        const list = await apiRequest<Monitor[]>("/monitors");
+        if (!cancelled) {
+          setMonitors(list ?? []);
+          setError(null);
+        }
+      } catch (pollError) {
+        if (!cancelled) {
+          setError(pollError instanceof Error ? pollError.message : "Unable to refresh monitors.");
+        }
+      }
+    };
+
+    void loadMonitors();
+    const intervalId = setInterval(() => {
+      void loadMonitors();
+    }, 30000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [user]);
 
   const resetForm = () => {
     setForm(defaultForm);
@@ -226,6 +275,23 @@ export default function Home() {
       failureThreshold: monitor.failureThreshold,
       enabled: monitor.enabled,
     });
+  };
+
+  const toggleMonitorChecks = async (monitorId: string) => {
+    const isExpanded = expandedMonitorId === monitorId;
+    setExpandedMonitorId(isExpanded ? null : monitorId);
+
+    if (!isExpanded && !recentChecks[monitorId]) {
+      try {
+        setIsLoadingChecks((current) => ({ ...current, [monitorId]: true }));
+        const history = await apiRequest<MonitorCheckHistoryItem[]>(`/monitors/${monitorId}/checks?limit=10`);
+        setRecentChecks((current) => ({ ...current, [monitorId]: history ?? [] }));
+      } catch (historyError) {
+        setError(historyError instanceof Error ? historyError.message : "Unable to load recent checks.");
+      } finally {
+        setIsLoadingChecks((current) => ({ ...current, [monitorId]: false }));
+      }
+    }
   };
 
   return (
@@ -449,7 +515,10 @@ export default function Home() {
                 ) : null}
 
                 <div className="space-y-4">
-                  <h2 className="text-xl font-medium text-zinc-50">Monitors</h2>
+                  <div className="flex items-center justify-between gap-3">
+                    <h2 className="text-xl font-medium text-zinc-50">Monitors</h2>
+                    <p className="text-xs text-zinc-400">Checks run automatically in the background. Dashboard data may take a short time to update.</p>
+                  </div>
 
                   {monitors.length === 0 ? (
                     <div className="rounded-lg border border-dashed border-zinc-700 bg-zinc-950/40 p-6 text-left">
@@ -496,12 +565,34 @@ export default function Home() {
                               <span className="text-zinc-500">Expected</span>
                               <div className="mt-1 text-zinc-100">{monitor.expectedStatusCode}</div>
                             </div>
-                            <div className="col-span-2">
+                            <div>
                               <span className="text-zinc-500">Last checked</span>
                               <div className="mt-1 text-zinc-100">
-                                {monitor.lastCheckedAt ? new Date(monitor.lastCheckedAt).toLocaleString() : "Never checked"}
+                                {monitor.lastCheckedAt ? new Date(monitor.lastCheckedAt).toLocaleString() : "Never"}
                               </div>
                             </div>
+                            <div>
+                              <span className="text-zinc-500">HTTP status</span>
+                              <div className="mt-1 text-zinc-100">{monitor.latestStatusCode ?? "—"}</div>
+                            </div>
+                            <div>
+                              <span className="text-zinc-500">Response time</span>
+                              <div className="mt-1 text-zinc-100">
+                                {monitor.latestResponseTimeMs != null ? `${monitor.latestResponseTimeMs} ms` : "—"}
+                              </div>
+                            </div>
+                            <div>
+                              <span className="text-zinc-500">Latest result</span>
+                              <div className="mt-1 text-zinc-100">
+                                {monitor.latestSuccess == null ? "—" : monitor.latestSuccess ? "Success" : "Failure"}
+                              </div>
+                            </div>
+                            {monitor.consecutiveFailures > 0 ? (
+                              <div>
+                                <span className="text-zinc-500">Failures</span>
+                                <div className="mt-1 text-zinc-100">{monitor.consecutiveFailures}</div>
+                              </div>
+                            ) : null}
                           </div>
 
                           <div className="mt-4 flex flex-wrap gap-2">
@@ -526,7 +617,49 @@ export default function Home() {
                             >
                               Delete
                             </button>
+                            <button
+                              type="button"
+                              onClick={() => void toggleMonitorChecks(monitor.id)}
+                              className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100"
+                            >
+                              {expandedMonitorId === monitor.id ? "Hide checks" : "Recent checks"}
+                            </button>
                           </div>
+
+                          {expandedMonitorId === monitor.id ? (
+                            <div className="mt-4 rounded-md border border-zinc-700 bg-zinc-950/60 p-3">
+                              {isLoadingChecks[monitor.id] ? (
+                                <div className="text-sm text-zinc-400">Loading recent checks…</div>
+                              ) : recentChecks[monitor.id]?.length ? (
+                                <div className="space-y-2 text-sm">
+                                  {recentChecks[monitor.id].map((entry) => (
+                                    <div key={entry.id} className="flex flex-col gap-1 border-b border-zinc-800 pb-2 last:border-b-0 last:pb-0">
+                                      <div className="flex items-center justify-between gap-3">
+                                        <span className="text-zinc-300">{new Date(entry.checkedAt).toLocaleString()}</span>
+                                        <span
+                                          className={[
+                                            "rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.2em]",
+                                            entry.success
+                                              ? "border border-emerald-500/50 bg-emerald-500/10 text-emerald-300"
+                                              : "border border-red-500/50 bg-red-500/10 text-red-300",
+                                          ].join(" ")}
+                                        >
+                                          {entry.success ? "Success" : "Failure"}
+                                        </span>
+                                      </div>
+                                      <div className="flex flex-wrap gap-3 text-xs text-zinc-400">
+                                        <span>Status: {entry.statusCode ?? "—"}</span>
+                                        <span>Response: {entry.responseTimeMs != null ? `${entry.responseTimeMs} ms` : "—"}</span>
+                                        {entry.errorType ? <span>Error: {entry.errorType}</span> : null}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="text-sm text-zinc-400">No checks recorded yet.</div>
+                              )}
+                            </div>
+                          ) : null}
                         </div>
                       ))}
                     </div>

@@ -1,28 +1,34 @@
 # StatusCore
 
-StatusCore is a self-hosted monitoring platform for checking the health of public services and exposing a simple dashboard for operations teams.
+StatusCore is a self-hosted monitoring platform for public services, built around GitHub authentication, monitor management, and safe HTTP checks.
 
-## Phase 2 implemented
+## Phase 3 implemented
 
-This repository now includes the following features:
+This repository includes the following Phase 3 features:
 
-- GitHub OAuth authentication
-- HttpOnly application session cookies
+- GitHub OAuth authentication with the minimum required profile scope
 - authenticated monitor CRUD
-- SSRF-aware target URL validation
-- PostgreSQL persistence via Prisma
+- SSRF-safe public target validation
+- Redis/BullMQ job queueing
+- 15-second scheduler scan for due monitors
+- separate monitoring worker process
+- secure HTTP/HTTPS checks
+- DNS/IP pinning for outbound socket connection
+- CheckResult history storage
+- automatic monitor state transitions
+- recent check history API and UI
 
 ## Planned and not yet implemented
 
-The following capabilities are intentionally still planned for future phases and are not part of the current implementation:
+The following capabilities remain intentionally out of scope for the current Phase 3 work:
 
-- actual HTTP monitoring
-- Redis/BullMQ processing
-- scheduler
-- monitoring worker
-- incident state machine
-- historical uptime and latency analytics
+- incident lifecycle
 - alerts
+- uptime/latency analytics
+- charts
+- public status pages
+- SSE/WebSockets
+- retention/rollups
 
 ## Current stack
 
@@ -33,6 +39,8 @@ The following capabilities are intentionally still planned for future phases and
 - NestJS
 - Prisma
 - PostgreSQL
+- Redis
+- BullMQ
 - Docker Compose
 
 ## Repository structure
@@ -63,6 +71,15 @@ statuscore/
 - npm
 - Docker Desktop or Docker Engine
 
+### Infrastructure
+
+```bash
+cd api
+docker compose up -d
+```
+
+This starts PostgreSQL and Redis for local development.
+
 ### Frontend
 
 ```bash
@@ -87,14 +104,22 @@ npm run start:dev
 
 The API runs on http://localhost:3001 by default.
 
-### Infrastructure
+### Monitoring worker
 
 ```bash
 cd api
-docker compose up -d
+npm run start:worker:dev
 ```
 
-This starts PostgreSQL 16 for local development. Redis remains a future dependency for the queue and worker layer.
+The worker runs the background monitor execution queue without starting the API HTTP server or scheduler.
+
+### Production worker
+
+```bash
+cd api
+npm run build
+npm run start:worker
+```
 
 ## Required environment variables
 
@@ -103,7 +128,6 @@ This starts PostgreSQL 16 for local development. Redis remains a future dependen
 ```env
 NODE_ENV=development
 PORT=3001
-CORS_ORIGIN=http://localhost:3000
 WEB_URL=http://localhost:3000
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
@@ -111,6 +135,7 @@ GITHUB_CALLBACK_URL=http://localhost:3001/auth/github/callback
 AUTH_SESSION_SECRET=replace-with-a-long-random-secret
 DATABASE_URL=postgresql://statuscore:statuscore_dev_password@localhost:5432/statuscore_dev?schema=public
 REDIS_URL=redis://localhost:6379
+MONITOR_WORKER_CONCURRENCY=10
 ```
 
 ### Web (.env.local)
@@ -121,4 +146,4 @@ NEXT_PUBLIC_API_URL=http://localhost:3001
 
 ## Notes
 
-The current implementation focuses on secure authenticated monitor management and safe target validation. It does not yet implement actual monitoring requests, scheduling, or alerting workflows.
+The current implementation includes authenticated monitoring, a queue-backed scheduler, protected outbound HTTP checks, and persisted check results. It intentionally excludes incidents, alerting, and public status features for this phase.

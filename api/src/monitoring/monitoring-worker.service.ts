@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Worker } from 'bullmq';
 import { MONITOR_CHECK_QUEUE, type MonitorCheckJobData } from './monitoring-queue.service.js';
@@ -10,8 +10,8 @@ export class MonitoringWorkerService implements OnModuleInit, OnModuleDestroy {
   private worker: Worker<MonitorCheckJobData> | null = null;
 
   constructor(
-    private readonly config: ConfigService,
-    private readonly monitorExecutionService: MonitorExecutionService,
+    @Inject(ConfigService) private readonly config: ConfigService,
+    @Inject(MonitorExecutionService) private readonly monitorExecutionService: MonitorExecutionService,
   ) {}
 
   async onModuleInit(): Promise<void> {

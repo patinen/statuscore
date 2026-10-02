@@ -7,6 +7,13 @@ import { DnsResolverService } from '../monitors/dns-resolver.service.js';
 import { TargetUrlValidationService } from '../monitors/ssrf-validation.service.js';
 import { TargetAddressService } from './target-address.service.js';
 
+class DnsResolutionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'DnsResolutionError';
+  }
+}
+
 export type HttpMethod = 'GET' | 'HEAD';
 
 export interface HttpMonitorCheckRequest {
@@ -35,9 +42,7 @@ export class SafeHttpClientService {
   async executeCheck(request: HttpMonitorCheckRequest): Promise<HttpMonitorCheckResult> {
     try {
       const normalizedUrl = await this.targetUrlValidationService.validateAndNormalize(request.url);
-      const parsedUrl = new URL(normalizedUrl);
-      const selectedAddress = await this.getValidatedAddress(parsedUrl.hostname);
-      return this.checkUrl(parsedUrl, selectedAddress, request.method, request.expectedStatusCode, request.timeoutMs, 0);
+      return this.checkResolvedUrl(new URL(normalizedUrl), request.method, request.expectedStatusCode, request.timeoutMs, 0);
     } catch (error) {
       if (error instanceof BadRequestException) {
         return {
@@ -49,18 +54,28 @@ export class SafeHttpClientService {
         };
       }
 
+      if (error instanceof DnsResolutionError) {
+        return {
+          success: false,
+          statusCode: null,
+          responseTimeMs: 0,
+          errorType: 'DNS_ERROR',
+          errorMessage: error.message,
+        };
+      }
+
       throw error;
     }
   }
 
-  private async checkUrl(
+  private async checkResolvedUrl(
     parsedUrl: URL,
-    selectedAddress: string,
     method: HttpMethod,
     expectedStatusCode: number,
     timeoutMs: number,
     redirectDepth: number,
   ): Promise<HttpMonitorCheckResult> {
+    const selectedAddress = await this.getValidatedAddress(parsedUrl.hostname);
     const requestFactory = parsedUrl.protocol === 'https:' ? httpsRequest : httpRequest;
     const startedAt = performance.now();
 
@@ -90,8 +105,10 @@ export class SafeHttpClientService {
           const responseTimeMs = Math.max(0, Math.round(performance.now() - startedAt));
 
           if ([301, 302, 303, 307, 308].includes(statusCode) && response.headers.location) {
+            response.resume();
+            response.destroy();
+
             if (redirectDepth >= 5) {
-              response.resume();
               resolve({
                 success: false,
                 statusCode,
@@ -102,7 +119,6 @@ export class SafeHttpClientService {
               return;
             }
 
-            response.resume();
             const redirectTarget = new URL(String(response.headers.location), parsedUrl).toString();
             void this.executeCheck({
               url: redirectTarget,
@@ -124,15 +140,15 @@ export class SafeHttpClientService {
           }
 
           response.resume();
-          response.on('end', () => {
-            const success = statusCode === expectedStatusCode;
-            resolve({
-              success,
-              statusCode,
-              responseTimeMs,
-              errorType: success ? null : 'UNEXPECTED_STATUS',
-              errorMessage: success ? null : `Unexpected status code ${statusCode}.`,
-            });
+          response.destroy();
+
+          const success = statusCode === expectedStatusCode;
+          resolve({
+            success,
+            statusCode,
+            responseTimeMs,
+            errorType: success ? null : 'UNEXPECTED_STATUS',
+            errorMessage: success ? null : `Unexpected status code ${statusCode}.`,
           });
         },
       );
@@ -174,22 +190,22 @@ export class SafeHttpClientService {
     const results = await this.dnsResolver.lookup(normalizedHostname, { all: true, verbatim: true }).catch(() => [] as Array<{ address: string }>);
 
     if (results.length === 0) {
-      throw new BadRequestException('Target hostname did not resolve to any usable public IP addresses.');
+      throw new DnsResolutionError('DNS lookup failed.');
     }
 
-    const usable = results.filter((entry) => !this.targetAddressService.isBlockedAddress(entry.address));
+    const blocked = results.some((entry) => this.targetAddressService.isBlockedAddress(entry.address));
 
-    if (usable.length === 0) {
-      throw new BadRequestException('Target hostname resolved only to blocked addresses.');
+    if (blocked) {
+      throw new BadRequestException('Target hostname resolves to a blocked internal or local address.');
     }
 
-    return this.targetAddressService.normalizeAddress(usable[0].address);
+    return this.targetAddressService.normalizeAddress(results[0].address);
   }
 
   private classifyError(message: string, name: string, code?: string): string {
     const safeMessage = message.toUpperCase();
 
-    if (safeMessage.includes('TIMEOUT') || safeMessage.includes('ECONNRESET') || code === 'ETIMEDOUT' || name === 'AbortError') {
+    if (safeMessage.includes('TIMEOUT') || code === 'ETIMEDOUT' || name === 'AbortError') {
       return 'TIMEOUT';
     }
 

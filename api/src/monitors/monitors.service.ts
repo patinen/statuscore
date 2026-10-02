@@ -26,7 +26,6 @@ export class MonitorService {
 
     return {
       id: monitor.id,
-      userId: monitor.userId,
       name: monitor.name,
       url: monitor.url,
       method: monitor.method,
@@ -38,7 +37,6 @@ export class MonitorService {
       currentStatus: monitor.currentStatus,
       consecutiveFailures: monitor.consecutiveFailures,
       lastCheckedAt: monitor.lastCheckedAt,
-      nextCheckAt: monitor.nextCheckAt,
       createdAt: monitor.createdAt,
       updatedAt: monitor.updatedAt,
       latestStatusCode: latestCheck?.statusCode ?? null,
@@ -155,7 +153,18 @@ export class MonitorService {
       enabled: boolean;
     }>,
   ) {
-    const existingMonitor = await this.getForUser(userId, monitorId);
+    const existingMonitor = await this.prisma.monitor.findFirst({
+      where: { id: monitorId, userId },
+      select: {
+        enabled: true,
+        nextCheckAt: true,
+      },
+    });
+
+    if (!existingMonitor) {
+      throw new NotFoundException('Monitor not found.');
+    }
+
     const nextUrl = data.url ? await this.targetUrlValidationService.validateAndNormalize(data.url) : undefined;
 
     const shouldEnable = data.enabled ?? existingMonitor.enabled;

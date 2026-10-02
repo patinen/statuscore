@@ -39,24 +39,8 @@ export class TargetUrlValidationService {
       throw new BadRequestException('Localhost and internal network targets are not allowed.');
     }
 
-    if (isIP(hostname)) {
-      if (this.targetAddressService.isBlockedAddress(hostname)) {
-        throw new BadRequestException('Only public routable IP addresses are allowed as targets.');
-      }
-
-      return this.toCanonicalUrl(url, hostname);
-    }
-
-    const lookups = await this.dnsResolver.lookup(hostname, { all: true, verbatim: true }).catch(() => [] as Array<{ address: string }>);
-
-    if (lookups.length === 0) {
-      throw new BadRequestException('Target hostname could not be resolved to a usable public IP address.');
-    }
-
-    const blocked = lookups.some((entry) => this.targetAddressService.isBlockedAddress(this.normalizeHostname(entry.address)));
-
-    if (blocked) {
-      throw new BadRequestException('Target hostname resolves to a blocked internal or local address.');
+    if (isIP(hostname) && this.targetAddressService.isBlockedAddress(hostname)) {
+      throw new BadRequestException('Only public routable IP addresses are allowed as targets.');
     }
 
     return this.toCanonicalUrl(url, hostname);

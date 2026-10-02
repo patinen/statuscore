@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service.js';
-import { SafeHttpClientService, type HttpMonitorCheckResult } from './safe-http-client.service.js';
+import { SafeHttpClientService } from './safe-http-client.service.js';
 
 @Injectable()
 export class MonitorExecutionService {
@@ -67,43 +67,5 @@ export class MonitorExecutionService {
       this.logger.error(`Infrastructure error processing monitor ${monitorId}: ${message}`);
       throw error;
     }
-  }
-
-  async processCronResult(result: HttpMonitorCheckResult, monitorId: string): Promise<void> {
-    const monitor = await this.prisma.monitor.findUnique({ where: { id: monitorId } });
-
-    if (!monitor) {
-      return;
-    }
-
-    const nextStatus = result.success
-      ? 'UP'
-      : result.statusCode === null
-        ? monitor.currentStatus === 'UNKNOWN'
-          ? 'UNKNOWN'
-          : monitor.currentStatus
-        : monitor.currentStatus;
-
-    await this.prisma.$transaction(async (tx) => {
-      await tx.checkResult.create({
-        data: {
-          monitorId,
-          success: result.success,
-          statusCode: result.statusCode,
-          responseTimeMs: result.responseTimeMs,
-          errorType: result.errorType ?? null,
-          errorMessage: result.errorMessage ?? null,
-        },
-      });
-
-      await tx.monitor.update({
-        where: { id: monitorId },
-        data: {
-          currentStatus: nextStatus,
-          consecutiveFailures: result.success ? 0 : monitor.consecutiveFailures + 1,
-          lastCheckedAt: new Date(),
-        },
-      });
-    });
   }
 }

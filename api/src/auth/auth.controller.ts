@@ -40,7 +40,7 @@ export class AuthController {
     url.searchParams.set('client_id', clientId);
     url.searchParams.set('redirect_uri', callbackUrl);
     url.searchParams.set('state', state);
-    url.searchParams.set('scope', 'read:user user:email');
+    url.searchParams.set('scope', 'read:user');
 
     return res.redirect(url.toString());
   }
