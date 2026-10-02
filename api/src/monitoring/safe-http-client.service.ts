@@ -42,7 +42,7 @@ export class SafeHttpClientService {
   async executeCheck(request: HttpMonitorCheckRequest): Promise<HttpMonitorCheckResult> {
     try {
       const normalizedUrl = await this.targetUrlValidationService.validateAndNormalize(request.url);
-      return this.checkResolvedUrl(new URL(normalizedUrl), request.method, request.expectedStatusCode, request.timeoutMs, 0);
+      return await this.checkResolvedUrl(new URL(normalizedUrl), request.method, request.expectedStatusCode, request.timeoutMs, 0);
     } catch (error) {
       if (error instanceof BadRequestException) {
         return {
@@ -74,8 +74,24 @@ export class SafeHttpClientService {
     expectedStatusCode: number,
     timeoutMs: number,
     redirectDepth: number,
+    pinnedAddress?: string,
+    redirectHistory: Set<string> = new Set(),
   ): Promise<HttpMonitorCheckResult> {
-    const selectedAddress = await this.getValidatedAddress(parsedUrl.hostname);
+    const redirectKey = `${parsedUrl.origin}${parsedUrl.pathname}${parsedUrl.search}`;
+    if (redirectDepth > 0 && redirectHistory.has(redirectKey)) {
+      return {
+        success: false,
+        statusCode: null,
+        responseTimeMs: 0,
+        errorType: 'TOO_MANY_REDIRECTS',
+        errorMessage: 'Too many redirects encountered.',
+      };
+    }
+
+    const nextRedirectHistory = new Set(redirectHistory);
+    nextRedirectHistory.add(redirectKey);
+
+    const selectedAddress = pinnedAddress ?? (await this.getValidatedAddress(parsedUrl.hostname));
     const requestFactory = parsedUrl.protocol === 'https:' ? httpsRequest : httpRequest;
     const startedAt = performance.now();
 
@@ -119,15 +135,47 @@ export class SafeHttpClientService {
               return;
             }
 
-            const redirectTarget = new URL(String(response.headers.location), parsedUrl).toString();
-            void this.executeCheck({
-              url: redirectTarget,
-              method,
-              expectedStatusCode,
-              timeoutMs,
-            })
-              .then((next) => resolve(next))
-              .catch(() => {
+            void (async () => {
+              try {
+                const redirectTarget = new URL(String(response.headers.location), parsedUrl).toString();
+                const normalizedRedirectTarget = await this.targetUrlValidationService.validateAndNormalize(redirectTarget);
+                const redirectUrl = new URL(normalizedRedirectTarget);
+                const resolvedAddress = await this.getValidatedAddress(redirectUrl.hostname);
+
+                const nextResult = await this.checkResolvedUrl(
+                  redirectUrl,
+                  method,
+                  expectedStatusCode,
+                  timeoutMs,
+                  redirectDepth + 1,
+                  resolvedAddress,
+                  new Set(nextRedirectHistory),
+                );
+
+                resolve(nextResult);
+              } catch (error) {
+                if (error instanceof BadRequestException) {
+                  resolve({
+                    success: false,
+                    statusCode,
+                    responseTimeMs,
+                    errorType: 'INVALID_TARGET',
+                    errorMessage: error.message,
+                  });
+                  return;
+                }
+
+                if (error instanceof DnsResolutionError) {
+                  resolve({
+                    success: false,
+                    statusCode,
+                    responseTimeMs,
+                    errorType: 'DNS_ERROR',
+                    errorMessage: error.message,
+                  });
+                  return;
+                }
+
                 resolve({
                   success: false,
                   statusCode,
@@ -135,7 +183,8 @@ export class SafeHttpClientService {
                   errorType: 'INVALID_TARGET',
                   errorMessage: 'Redirect target is invalid or blocked.',
                 });
-              });
+              }
+            })();
             return;
           }
 
