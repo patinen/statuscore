@@ -8,7 +8,6 @@ import {
   IsString,
   Length,
   Matches,
-  ValidateIf,
   registerDecorator,
   type ValidationArguments,
   type ValidationOptions,
@@ -30,25 +29,6 @@ function IsReservedStatusPageSlug(validationOptions?: ValidationOptions) {
         },
         defaultMessage(args: ValidationArguments) {
           return `${args.property} is reserved.`;
-        },
-      },
-    });
-  };
-}
-
-function IsExplicitNull(validationOptions?: ValidationOptions) {
-  return function (target: object, propertyName: string) {
-    registerDecorator({
-      name: 'IsExplicitNull',
-      target: target.constructor,
-      propertyName,
-      options: validationOptions,
-      validator: {
-        validate(value: unknown) {
-          return value === null;
-        },
-        defaultMessage(args: ValidationArguments) {
-          return `${args.property} must be null.`;
         },
       },
     });
@@ -98,19 +78,21 @@ export class UpdateStatusPageDto {
   @IsReservedStatusPageSlug({ message: 'slug is reserved.' })
   slug?: string;
 
-  @ValidateIf((_: object, value: unknown) => value !== undefined)
   @Transform(({ value }) => {
-    if (value === null) {
-      return null;
+    if (value === undefined || value === null) {
+      return value;
     }
 
-    return String(value ?? '').trim();
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    }
+
+    return value;
   })
-  @ValidateIf((_: object, value: unknown) => value !== null && value !== undefined)
+  @IsOptional()
   @IsString()
   @Length(1, 500)
-  @ValidateIf((_: object, value: unknown) => value === null)
-  @IsExplicitNull()
   description?: string | null;
 
   @IsOptional()

@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException, ValidationPipe } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { validate } from 'class-validator';
 import { readFileSync } from 'node:fs';
@@ -38,6 +38,19 @@ const createService = (overrides: Record<string, unknown> = {}) => {
 };
 
 describe('StatusPage DTOs', () => {
+  const validationPipe = new ValidationPipe({
+    transform: true,
+    whitelist: true,
+    forbidNonWhitelisted: true,
+  });
+
+  const transformUpdateDto = async (payload: unknown) =>
+    validationPipe.transform(payload, {
+      type: 'body',
+      metatype: UpdateStatusPageDto,
+      data: '',
+    });
+
   it('accepts the create payload shape and rejects reserved or invalid slugs', async () => {
     const validCreate = Object.assign(new CreateStatusPageDto(), {
       name: 'My Services',
@@ -69,6 +82,30 @@ describe('StatusPage DTOs', () => {
     });
 
     await expect(validate(validUpdate)).resolves.toHaveLength(0);
+  });
+
+  it('applies update description transform/validation semantics through ValidationPipe', async () => {
+    const omitted = (await transformUpdateDto({ enabled: true })) as UpdateStatusPageDto;
+    expect(omitted.description).toBeUndefined();
+
+    const nullDescription = (await transformUpdateDto({ description: null })) as UpdateStatusPageDto;
+    expect(nullDescription.description).toBeNull();
+
+    const emptyString = (await transformUpdateDto({ description: '' })) as UpdateStatusPageDto;
+    expect(emptyString.description).toBeNull();
+
+    const whitespace = (await transformUpdateDto({ description: '   ' })) as UpdateStatusPageDto;
+    expect(whitespace.description).toBeNull();
+
+    const trimmed = (await transformUpdateDto({ description: '  hello  ' })) as UpdateStatusPageDto;
+    expect(trimmed.description).toBe('hello');
+
+    await expect(
+      transformUpdateDto({ description: 'x'.repeat(501) }),
+    ).rejects.toThrow(BadRequestException);
+
+    await expect(transformUpdateDto({ description: 123 })).rejects.toThrow(BadRequestException);
+    await expect(transformUpdateDto({ description: { text: 'hello' } })).rejects.toThrow(BadRequestException);
   });
 });
 
