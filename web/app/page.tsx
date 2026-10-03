@@ -70,7 +70,7 @@ type NotificationDeliveryStatus = "all" | "pending" | "sent" | "failed";
 type NotificationDeliveryRecord = {
   id: string;
   eventType: "INCIDENT_OPENED" | "INCIDENT_RESOLVED";
-  status: "PENDING" | "SENT" | "FAILED";
+  status: "PENDING" | "PROCESSING" | "SENT" | "FAILED";
   attemptCount: number;
   channel: {
     id: string;
@@ -347,7 +347,10 @@ export default function Home() {
   };
 
   const handleChannelSubmit = async () => {
-    if (!channelForm.name.trim()) {
+    const name = channelForm.name.trim();
+    const url = channelForm.url.trim();
+
+    if (!name) {
       setError("Channel name is required.");
       return;
     }
@@ -357,20 +360,26 @@ export default function Home() {
       return;
     }
 
-    if (!editingChannelId && !channelForm.url.trim()) {
+    if (!editingChannelId && !url) {
       setError("Webhook URL is required.");
       return;
     }
 
     try {
       setError(null);
-      const payload = {
-        name: channelForm.name.trim(),
-        type: channelForm.type,
-        enabled: channelForm.enabled,
-        monitorIds: channelForm.monitorIds,
-        ...(channelForm.url.trim() ? { url: channelForm.url.trim() } : {}),
-      };
+      const payload = editingChannelId
+        ? {
+            name,
+            enabled: channelForm.enabled,
+            monitorIds: channelForm.monitorIds,
+            ...(url ? { url } : {}),
+          }
+        : {
+            name,
+            type: channelForm.type,
+            url,
+            monitorIds: channelForm.monitorIds,
+          };
 
       if (editingChannelId) {
         await apiRequest<void>(`/notification-channels/${editingChannelId}`, {
@@ -831,11 +840,15 @@ export default function Home() {
                         <select
                           value={channelForm.type}
                           onChange={(event) => setChannelForm((current) => ({ ...current, type: event.target.value as 'DISCORD' | 'WEBHOOK' }))}
-                          className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                          disabled={Boolean(editingChannelId)}
+                          className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100 disabled:cursor-not-allowed disabled:opacity-70"
                         >
                           <option value="WEBHOOK">Generic webhook</option>
                           <option value="DISCORD">Discord</option>
                         </select>
+                        {editingChannelId ? (
+                          <div className="mt-1 text-xs text-zinc-500">Type is fixed after creation.</div>
+                        ) : null}
                       </label>
 
                       <label className="block text-sm text-zinc-300 md:col-span-2">
@@ -855,15 +868,21 @@ export default function Home() {
                         </div>
                       ) : null}
 
-                      <label className="flex items-center justify-between rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-3 text-sm text-zinc-300 md:col-span-2">
-                        Enabled
-                        <input
-                          type="checkbox"
-                          checked={channelForm.enabled}
-                          onChange={(event) => setChannelForm((current) => ({ ...current, enabled: event.target.checked }))}
-                          className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-emerald-400"
-                        />
-                      </label>
+                      {editingChannelId ? (
+                        <label className="flex items-center justify-between rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-3 text-sm text-zinc-300 md:col-span-2">
+                          Enabled
+                          <input
+                            type="checkbox"
+                            checked={channelForm.enabled}
+                            onChange={(event) => setChannelForm((current) => ({ ...current, enabled: event.target.checked }))}
+                            className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-emerald-400"
+                          />
+                        </label>
+                      ) : (
+                        <div className="rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-3 text-sm text-zinc-400 md:col-span-2">
+                          New channels start enabled.
+                        </div>
+                      )}
 
                       <div className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900/60 p-3">
                         <div className="mb-2 text-sm font-medium text-zinc-200">Linked monitors</div>

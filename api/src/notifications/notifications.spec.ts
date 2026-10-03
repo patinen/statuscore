@@ -1,12 +1,74 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ValidationPipe } from '@nestjs/common';
 import { validate } from 'class-validator';
 import { describe, expect, it, vi } from 'vitest';
 import { NotificationDeliveryService } from './notification-delivery.service.js';
-import { NotificationDeliveryQueryDto } from './notifications.dto.js';
+import { CreateNotificationChannelDto, NotificationDeliveryQueryDto, UpdateNotificationChannelDto } from './notifications.dto.js';
 import { NotificationsService } from './notifications.service.js';
 import { NotificationSecretService } from './notification-secret.service.js';
 
+const createValidationPipe = () =>
+  new ValidationPipe({
+    transform: true,
+    whitelist: true,
+    forbidNonWhitelisted: true,
+  });
+
 describe('NotificationsService', () => {
+  it('accepts the create notification channel DTO shape and rejects unsupported create fields', async () => {
+    const validCreateDto = Object.assign(new CreateNotificationChannelDto(), {
+      name: 'Ops hook',
+      type: 'WEBHOOK',
+      url: 'https://hooks.example.com/webhook',
+      monitorIds: ['monitor-1'],
+    });
+
+    await expect(validate(validCreateDto)).resolves.toHaveLength(0);
+
+    await expect(
+      createValidationPipe().transform(
+        {
+          name: 'Ops hook',
+          type: 'WEBHOOK',
+          url: 'https://hooks.example.com/webhook',
+          monitorIds: ['monitor-1'],
+          enabled: true,
+        },
+        { type: 'body', metatype: CreateNotificationChannelDto, data: '' },
+      ),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('accepts the update notification channel DTO shape and rejects type on update', async () => {
+    const validUpdateDto = Object.assign(new UpdateNotificationChannelDto(), {
+      name: 'Ops hook',
+      enabled: false,
+      monitorIds: ['monitor-1'],
+      url: 'https://hooks.example.com/webhook',
+    });
+
+    await expect(validate(validUpdateDto)).resolves.toHaveLength(0);
+
+    const updateWithoutUrl = Object.assign(new UpdateNotificationChannelDto(), {
+      name: 'Ops hook',
+      enabled: true,
+      monitorIds: ['monitor-1'],
+    });
+
+    await expect(validate(updateWithoutUrl)).resolves.toHaveLength(0);
+
+    await expect(
+      createValidationPipe().transform(
+        {
+          name: 'Ops hook',
+          enabled: false,
+          monitorIds: ['monitor-1'],
+          type: 'DISCORD',
+        },
+        { type: 'body', metatype: UpdateNotificationChannelDto, data: '' },
+      ),
+    ).rejects.toThrow(BadRequestException);
+  });
+
   it('rejects unsupported delivery status values and applies the default delivery limit', async () => {
     const prisma = {
       notificationDelivery: {
@@ -91,6 +153,162 @@ describe('NotificationsService', () => {
         ]),
       }),
     );
+  });
+
+  it('creates notification channels with a safe serialized response', async () => {
+    const now = new Date('2026-10-03T00:00:00Z');
+    const prisma = {
+      notificationChannel: {
+        count: vi.fn(async () => 0),
+      },
+      monitor: {
+        findMany: vi.fn(async () => [{ id: 'monitor-1' }]),
+      },
+      $transaction: vi.fn(async (callback: any) =>
+        callback({
+          notificationChannel: {
+            create: vi.fn(async ({ data }: any) => ({
+              id: 'channel-1',
+              createdAt: now,
+              updatedAt: now,
+              monitorAssociations: [],
+              ...data,
+            })),
+          },
+          monitorNotificationChannel: {
+            createMany: vi.fn(async () => ({ count: 1 })),
+          },
+        }),
+      ),
+    } as any;
+
+    const service = new NotificationsService(
+      prisma,
+      {
+        encryptEndpoint: (value: string) => `enc:${value}`,
+        decryptEndpoint: (value: string) => value.replace(/^enc:/, ''),
+      } as never,
+    );
+
+    const result = await service.createForUser('user-1', {
+      name: 'Ops hook',
+      type: 'WEBHOOK',
+      url: 'https://hooks.example.com/webhook',
+      monitorIds: ['monitor-1'],
+    });
+
+    expect(result).toMatchObject({
+      id: 'channel-1',
+      name: 'Ops hook',
+      type: 'WEBHOOK',
+      enabled: true,
+      endpointHost: 'hooks.example.com',
+      monitorIds: ['monitor-1'],
+    });
+    expect(result).not.toHaveProperty('endpointEncrypted');
+    expect(result).not.toHaveProperty('url');
+  });
+
+  it('keeps the existing endpoint when updating without a replacement URL and replaces it when provided', async () => {
+    const now = new Date('2026-10-03T00:00:00Z');
+    const existingChannel = {
+      id: 'channel-1',
+      userId: 'user-1',
+      name: 'Ops hook',
+      type: 'WEBHOOK',
+      endpointEncrypted: 'enc:https://hooks.example.com/original',
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+      monitorAssociations: [{ monitorId: 'monitor-1' }],
+    };
+
+    const update = vi.fn(async ({ data }: any) => ({
+      ...existingChannel,
+      ...data,
+      monitorAssociations: existingChannel.monitorAssociations,
+      updatedAt: now,
+    }));
+
+    const prisma = {
+      notificationChannel: {
+        findFirst: vi.fn(async () => existingChannel),
+        update,
+      },
+      monitor: {
+        findMany: vi.fn(async () => [{ id: 'monitor-1' }]),
+      },
+      monitorNotificationChannel: {
+        deleteMany: vi.fn(async () => ({ count: 1 })),
+        createMany: vi.fn(async () => ({ count: 1 })),
+      },
+      $transaction: vi.fn(async (callback: any) =>
+        callback({
+          notificationChannel: {
+            update,
+          },
+          monitorNotificationChannel: {
+            deleteMany: vi.fn(async () => ({ count: 1 })),
+            createMany: vi.fn(async () => ({ count: 1 })),
+          },
+        }),
+      ),
+    } as any;
+
+    const service = new NotificationsService(
+      prisma,
+      {
+        encryptEndpoint: (value: string) => `enc:${value}`,
+        decryptEndpoint: (value: string) => value.replace(/^enc:/, ''),
+      } as never,
+    );
+
+    const unchanged = await service.updateForUser('user-1', 'channel-1', {
+      name: 'Renamed hook',
+      enabled: false,
+      monitorIds: ['monitor-1'],
+    });
+
+    expect(update).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        where: { id: 'channel-1' },
+        data: expect.objectContaining({
+          name: 'Renamed hook',
+          enabled: false,
+        }),
+      }),
+    );
+    expect(update.mock.calls[0][0].data).not.toHaveProperty('endpointEncrypted');
+    expect(unchanged).toMatchObject({
+      name: 'Renamed hook',
+      enabled: false,
+      endpointHost: 'hooks.example.com',
+      monitorIds: ['monitor-1'],
+    });
+
+    update.mockClear();
+
+    const replaced = await service.updateForUser('user-1', 'channel-1', {
+      enabled: true,
+      url: 'https://hooks.example.com/replaced',
+      monitorIds: ['monitor-1'],
+    });
+
+    expect(update).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        where: { id: 'channel-1' },
+        data: expect.objectContaining({
+          endpointEncrypted: 'enc:https://hooks.example.com/replaced',
+        }),
+      }),
+    );
+    expect(replaced).toMatchObject({
+      enabled: true,
+      endpointHost: 'hooks.example.com',
+      monitorIds: ['monitor-1'],
+    });
   });
 });
 
