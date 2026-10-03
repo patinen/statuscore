@@ -95,7 +95,10 @@ model MonitorNotificationChannel {
 
 model NotificationDelivery {
   id            String                       @id @default(uuid()) @db.Uuid
+  userId        String                       @db.Uuid
   channelId     String?                      @db.Uuid
+  channelName   String?                      @db.VarChar(100)
+  channelType   NotificationChannelType?
   incidentId    String                       @db.Uuid
   eventType     NotificationDeliveryEventType
   status        NotificationDeliveryStatus   @default(PENDING)
@@ -112,6 +115,7 @@ model NotificationDelivery {
 
   @@unique([channelId, incidentId, eventType])
   @@index([status, nextAttemptAt])
+  @@index([userId, status, nextAttemptAt])
   @@index([channelId])
   @@index([incidentId])
 }

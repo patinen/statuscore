@@ -6,6 +6,8 @@ export const NOTIFICATION_DELIVERY_QUEUE = 'notification-delivery';
 
 export interface NotificationDeliveryJobData {
   deliveryId: string;
+  attemptNumber: number;
+  scheduledFor: string;
 }
 
 @Injectable()
@@ -27,8 +29,10 @@ export class NotificationQueueService implements OnModuleDestroy {
     });
   }
 
-  async enqueueDelivery(deliveryId: string): Promise<void> {
-    const jobId = `notification-delivery-${deliveryId}`;
+  async enqueueDelivery(deliveryId: string, attemptNumber = 1): Promise<void> {
+    const nextAttemptNumber = Math.max(1, Number(attemptNumber) || 1);
+    const scheduledFor = new Date().toISOString();
+    const jobId = `notification-delivery-${deliveryId}-attempt-${nextAttemptNumber}`;
     const options: JobsOptions = {
       jobId,
       attempts: 5,
@@ -37,8 +41,8 @@ export class NotificationQueueService implements OnModuleDestroy {
       removeOnFail: 100,
     };
 
-    await this.queue.add('deliver', { deliveryId }, options);
-    this.logger.debug(`Queued notification delivery ${deliveryId}`);
+    await this.queue.add('deliver', { deliveryId, attemptNumber: nextAttemptNumber, scheduledFor }, options);
+    this.logger.debug(`Queued notification delivery ${deliveryId} for attempt ${nextAttemptNumber}`);
   }
 
   async onModuleDestroy(): Promise<void> {

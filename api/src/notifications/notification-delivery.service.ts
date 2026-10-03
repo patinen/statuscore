@@ -3,9 +3,9 @@ import { Prisma, type NotificationChannel, type NotificationDeliveryEventType, t
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import * as ipaddr from 'ipaddr.js';
+import { PrismaService } from '../database/prisma.service.js';
 import { DnsResolverService } from '../monitors/dns-resolver.service.js';
 import { TargetAddressService } from '../monitoring/target-address.service.js';
-import { PrismaService } from '../database/prisma.service.js';
 import { NotificationSecretService } from './notification-secret.service.js';
 
 const MAX_DELIVERY_ATTEMPTS = 5;
@@ -20,6 +20,13 @@ type DeliveryTarget = {
   channel: NotificationChannel | null;
   incident: (Incident & { monitor: Monitor & { user: User } }) | null;
 };
+
+interface DeliveryResult {
+  success: boolean;
+  retryable: boolean;
+  errorMessage: string | null;
+  nextAttemptAt?: Date;
+}
 
 @Injectable()
 export class NotificationDeliveryService {
@@ -43,14 +50,40 @@ export class NotificationDeliveryService {
       return;
     }
 
-    await tx.notificationDelivery.createMany({
-      data: channelIds.map((channelId) => ({
-        channelId,
+    const incident = await tx.incident.findUnique({
+      where: { id: incidentId },
+      include: { monitor: { select: { userId: true } } },
+    });
+
+    if (!incident) {
+      return;
+    }
+
+    const channels = await tx.notificationChannel.findMany({
+      where: { id: { in: channelIds }, enabled: true },
+      select: { id: true, userId: true, name: true, type: true },
+    });
+
+    const rowData = channels
+      .filter((channel) => channel.userId === incident.monitor.userId)
+      .map((channel) => ({
+        userId: incident.monitor.userId,
+        channelId: channel.id,
+        channelName: channel.name,
+        channelType: channel.type,
         incidentId,
         eventType,
-        status: 'PENDING',
+        status: 'PENDING' as const,
+        attemptCount: 0,
         nextAttemptAt,
-      })),
+      }));
+
+    if (rowData.length === 0) {
+      return;
+    }
+
+    await tx.notificationDelivery.createMany({
+      data: rowData,
       skipDuplicates: true,
     });
   }
@@ -63,22 +96,19 @@ export class NotificationDeliveryService {
         incident: {
           include: {
             monitor: {
-              include: {
-                user: true,
-              },
+              include: { user: true },
             },
           },
         },
       },
     });
 
-    if (!delivery) {
+    if (!delivery || delivery.status === 'SENT') {
       return;
     }
 
-    if (delivery.status === 'SENT') {
-      return;
-    }
+    const attemptNumber = delivery.attemptCount + 1;
+    const now = new Date();
 
     if (!delivery.channel || !delivery.incident) {
       await this.prisma.notificationDelivery.update({
@@ -87,6 +117,8 @@ export class NotificationDeliveryService {
           status: 'FAILED',
           lastError: 'Delivery target was removed or invalid.',
           nextAttemptAt: null,
+          lastAttemptAt: now,
+          attemptCount: attemptNumber,
         },
       });
       return;
@@ -99,69 +131,94 @@ export class NotificationDeliveryService {
           status: 'FAILED',
           lastError: 'Channel ownership mismatch.',
           nextAttemptAt: null,
+          lastAttemptAt: now,
+          attemptCount: attemptNumber,
         },
       });
       return;
     }
 
-    const endpoint = this.notificationSecretService.decryptEndpoint(delivery.channel.endpointEncrypted);
-    const payload = this.buildPayload(delivery);
-
     try {
-      const result = await this.sendWebhook(endpoint, payload, delivery.id, delivery.eventType);
+      await this.prisma.notificationDelivery.update({
+        where: { id: delivery.id },
+        data: {
+          status: 'PROCESSING',
+          attemptCount: attemptNumber,
+          lastAttemptAt: now,
+          lastError: null,
+        },
+      });
+
+      const endpoint = this.notificationSecretService.decryptEndpoint(delivery.channel.endpointEncrypted);
+      const payload = this.buildPayload(delivery);
+      const result = await this.sendWebhook(endpoint, payload, delivery.id, delivery.eventType, delivery.channel.type);
 
       if (result.success) {
         await this.prisma.notificationDelivery.update({
           where: { id: delivery.id },
           data: {
             status: 'SENT',
-            sentAt: new Date(),
+            sentAt: now,
             lastError: null,
-            lastAttemptAt: new Date(),
+            lastAttemptAt: now,
+            attemptCount: attemptNumber,
             nextAttemptAt: null,
           },
         });
         return;
       }
 
-      const nextAttempt = delivery.attemptCount + 1;
-      const shouldRetry = result.retryable && nextAttempt < MAX_DELIVERY_ATTEMPTS;
+      if (result.retryable && attemptNumber < MAX_DELIVERY_ATTEMPTS) {
+        await this.prisma.notificationDelivery.update({
+          where: { id: delivery.id },
+          data: {
+            status: 'PENDING',
+            lastError: result.errorMessage ?? 'Retry scheduled after transient webhook error.',
+            nextAttemptAt: result.nextAttemptAt ?? this.computeNextAttemptTime(attemptNumber),
+            lastAttemptAt: now,
+            attemptCount: attemptNumber,
+          },
+        });
+        return;
+      }
 
       await this.prisma.notificationDelivery.update({
         where: { id: delivery.id },
         data: {
-          status: shouldRetry ? 'PENDING' : 'FAILED',
-          attemptCount: nextAttempt,
-          lastAttemptAt: new Date(),
-          lastError: result.errorMessage ?? null,
-          nextAttemptAt: shouldRetry ? this.computeNextAttemptTime(nextAttempt) : null,
+          status: 'FAILED',
+          lastError: result.errorMessage ?? 'Notification delivery failed permanently.',
+          nextAttemptAt: null,
+          lastAttemptAt: now,
+          attemptCount: attemptNumber,
         },
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown notification failure';
-      const nextAttempt = delivery.attemptCount + 1;
-      const shouldRetry = nextAttempt < MAX_DELIVERY_ATTEMPTS;
+      const shouldRetry = attemptNumber < MAX_DELIVERY_ATTEMPTS && !this.isPermanentDeliveryFailure(message);
 
       await this.prisma.notificationDelivery.update({
         where: { id: delivery.id },
         data: {
           status: shouldRetry ? 'PENDING' : 'FAILED',
-          attemptCount: nextAttempt,
-          lastAttemptAt: new Date(),
           lastError: message,
-          nextAttemptAt: shouldRetry ? this.computeNextAttemptTime(nextAttempt) : null,
+          nextAttemptAt: shouldRetry ? this.computeNextAttemptTime(attemptNumber) : null,
+          lastAttemptAt: now,
+          attemptCount: attemptNumber,
         },
       });
     }
   }
 
   async listForUser(userId: string, status: string | undefined, limit: number) {
-    const where: Prisma.NotificationDeliveryWhereInput = {
-      channel: { userId },
-    };
+    const normalizedStatus = status?.toLowerCase();
+    const allowed = new Set(['all', 'pending', 'sent', 'failed']);
+    if (normalizedStatus && !allowed.has(normalizedStatus)) {
+      throw new Error('status must be one of: all, pending, sent, failed.');
+    }
 
-    if (status && status !== 'all') {
-      where.status = status.toUpperCase() as NotificationDeliveryStatus;
+    const where: Prisma.NotificationDeliveryWhereInput = { userId };
+    if (normalizedStatus && normalizedStatus !== 'all') {
+      where.status = normalizedStatus.toUpperCase() as NotificationDeliveryStatus;
     }
 
     const deliveries = await this.prisma.notificationDelivery.findMany({
@@ -169,7 +226,6 @@ export class NotificationDeliveryService {
       orderBy: { createdAt: 'desc' },
       take: Math.min(Math.max(limit, 1), 100),
       include: {
-        channel: { select: { id: true, name: true, type: true } },
         incident: { include: { monitor: { select: { name: true } } } },
       },
     });
@@ -179,15 +235,21 @@ export class NotificationDeliveryService {
       eventType: delivery.eventType,
       status: delivery.status,
       attemptCount: delivery.attemptCount,
+      channel: {
+        id: delivery.channelId,
+        name: delivery.channelName ?? 'Deleted channel',
+        type: delivery.channelType ?? 'WEBHOOK',
+      },
+      monitor: delivery.incident
+        ? { id: delivery.incident.monitorId, name: delivery.incident.monitor.name }
+        : null,
       lastAttemptAt: delivery.lastAttemptAt,
       sentAt: delivery.sentAt,
       lastError: delivery.lastError,
       createdAt: delivery.createdAt,
-      channel: delivery.channel ? { id: delivery.channel.id, name: delivery.channel.name, type: delivery.channel.type } : null,
       incident: delivery.incident
         ? {
             id: delivery.incident.id,
-            monitorName: delivery.incident.monitor.name,
             startedAt: delivery.incident.startedAt,
             resolvedAt: delivery.incident.resolvedAt,
           }
@@ -197,31 +259,41 @@ export class NotificationDeliveryService {
 
   private buildPayload(delivery: DeliveryTarget) {
     const monitor = delivery.incident?.monitor;
+    const occurredAt = delivery.eventType === 'INCIDENT_OPENED'
+      ? delivery.incident?.startedAt ?? new Date()
+      : delivery.incident?.resolvedAt ?? new Date();
+
     const payload: Record<string, unknown> = {
       event: delivery.eventType === 'INCIDENT_OPENED' ? 'incident.opened' : 'incident.resolved',
       deliveryId: delivery.id,
-      occurredAt: new Date().toISOString(),
+      occurredAt: occurredAt.toISOString(),
       monitor: {
         id: monitor?.id ?? '',
         name: monitor?.name ?? '',
         url: monitor?.url ?? '',
-        status: monitor?.currentStatus ?? 'UNKNOWN',
+        status: delivery.eventType === 'INCIDENT_OPENED' ? 'DOWN' : 'UP',
       },
       incident: {
         id: delivery.incident?.id ?? '',
-        startedAt: delivery.incident?.startedAt ?? new Date().toISOString(),
+        startedAt: delivery.incident?.startedAt ?? occurredAt.toISOString(),
         resolvedAt: delivery.incident?.resolvedAt ?? null,
         reason: delivery.incident?.reason ?? '',
         durationMs: delivery.incident?.resolvedAt
           ? delivery.incident.resolvedAt.getTime() - delivery.incident.startedAt.getTime()
-          : Date.now() - delivery.incident!.startedAt.getTime(),
+          : Math.max(0, Date.now() - delivery.incident!.startedAt.getTime()),
       },
     };
 
     return payload;
   }
 
-  private async sendWebhook(endpoint: string, payload: Record<string, unknown>, deliveryId: string, eventType: NotificationDeliveryEventType) {
+  private async sendWebhook(
+    endpoint: string,
+    payload: Record<string, unknown>,
+    deliveryId: string,
+    eventType: NotificationDeliveryEventType,
+    channelType: NotificationChannel['type'],
+  ): Promise<DeliveryResult> {
     const parsed = new URL(endpoint);
 
     if (parsed.protocol !== 'https:') {
@@ -232,27 +304,97 @@ export class NotificationDeliveryService {
       return { success: false, retryable: false, errorMessage: 'Credentials are not allowed in notification URLs.' };
     }
 
-    const resolvedAddress = await this.resolvePinnedAddress(parsed.hostname);
+    if (channelType === 'DISCORD') {
+      const discordPayload = this.buildDiscordPayload(eventType, payload, deliveryId);
+      return this.sendHttpRequest(parsed, JSON.stringify(discordPayload), {
+        'X-StatusCore-Event': eventType === 'INCIDENT_OPENED' ? 'incident.opened' : 'incident.resolved',
+        'X-StatusCore-Delivery': deliveryId,
+        'Content-Type': 'application/json',
+      }, 'discord');
+    }
+
     const eventName = eventType === 'INCIDENT_OPENED' ? 'incident.opened' : 'incident.resolved';
     const body = JSON.stringify(payload);
 
-    return new Promise<{ success: boolean; retryable: boolean; errorMessage: string | null }>((resolve) => {
+    return this.sendHttpRequest(parsed, body, {
+      'Content-Type': 'application/json',
+      'User-Agent': 'StatusCore/1.0',
+      'X-StatusCore-Event': eventName,
+      'X-StatusCore-Delivery': deliveryId,
+    }, 'generic');
+  }
+
+  private buildDiscordPayload(eventType: NotificationDeliveryEventType, payload: Record<string, unknown>, deliveryId: string) {
+    const incident = payload.incident as Record<string, unknown> | undefined;
+    const monitor = payload.monitor as Record<string, unknown> | undefined;
+    const monitorName = String(monitor?.name ?? 'Service');
+    const monitorUrl = String(monitor?.url ?? '');
+    const reason = String(incident?.reason ?? 'No reason provided');
+    const startedAt = incident?.startedAt ? new Date(String(incident.startedAt)).toISOString() : '';
+    const resolvedAt = incident?.resolvedAt ? new Date(String(incident.resolvedAt)).toISOString() : '';
+    const durationMs = Number(incident?.durationMs ?? 0);
+
+    const title = eventType === 'INCIDENT_OPENED'
+      ? `Incident opened: ${this.truncate(monitorName, 80)}`
+      : `Incident resolved: ${this.truncate(monitorName, 80)}`;
+
+    const description = eventType === 'INCIDENT_OPENED'
+      ? `Monitor was marked DOWN.`
+      : `Monitor recovered to UP.`;
+
+    const fields = [
+      { name: 'Monitor', value: this.truncate(monitorUrl || monitorName, 512), inline: false },
+      { name: 'Status', value: eventType === 'INCIDENT_OPENED' ? 'DOWN' : 'UP', inline: true },
+      { name: 'Reason', value: this.truncate(reason, 512), inline: false },
+      { name: 'Started', value: this.truncate(startedAt || 'Unknown', 256), inline: true },
+    ];
+
+    if (eventType === 'INCIDENT_RESOLVED') {
+      fields.push(
+        { name: 'Resolved', value: this.truncate(resolvedAt || 'Unknown', 256), inline: true },
+        { name: 'Duration', value: this.truncate(String(Math.max(0, durationMs)), 64), inline: true },
+      );
+    }
+
+    return {
+      username: 'StatusCore',
+      avatar_url: null,
+      content: null,
+      allowed_mentions: { parse: [] },
+      embeds: [{
+        title,
+        description,
+        color: eventType === 'INCIDENT_OPENED' ? 16711680 : 65280,
+        fields,
+        footer: { text: `Delivery ${this.truncate(deliveryId, 64)}` },
+      }],
+    };
+  }
+
+  private async sendHttpRequest(
+    parsed: URL,
+    body: string,
+    extraHeaders: Record<string, string>,
+    type: 'generic' | 'discord',
+  ): Promise<DeliveryResult> {
+    const resolvedAddress = await this.resolvePinnedAddress(parsed.hostname);
+    const requestHeaders = {
+      ...extraHeaders,
+      'Host': parsed.host,
+      'User-Agent': 'StatusCore/1.0',
+      'Content-Length': String(Buffer.byteLength(body)),
+    };
+
+    return new Promise<DeliveryResult>((resolve) => {
       const req = httpsRequest(
         {
           protocol: parsed.protocol,
           hostname: resolvedAddress,
-          port: 443,
+          port: parsed.port ? Number(parsed.port) : 443,
           path: `${parsed.pathname}${parsed.search}`,
           method: 'POST',
           timeout: 10000,
-          headers: {
-            'Content-Type': 'application/json',
-            'User-Agent': 'StatusCore/1.0',
-            'Host': parsed.host,
-            'X-StatusCore-Event': eventName,
-            'X-StatusCore-Delivery': deliveryId,
-            'Content-Length': Buffer.byteLength(body),
-          },
+          headers: requestHeaders,
           lookup: (_hostname, _options, callback) => {
             const family = ipaddr.parse(resolvedAddress).kind() === 'ipv6' ? 6 : 4;
             callback(null, resolvedAddress, family);
@@ -262,6 +404,10 @@ export class NotificationDeliveryService {
         },
         (response) => {
           const statusCode = response.statusCode ?? 0;
+          const retryAfterValue = response.headers['retry-after'];
+          const retryAfterMs = this.parseRetryAfterToMs(retryAfterValue);
+          const nextAttemptAt = retryAfterMs ? new Date(Date.now() + retryAfterMs) : undefined;
+
           response.resume();
           response.destroy();
 
@@ -271,7 +417,12 @@ export class NotificationDeliveryService {
           }
 
           if (statusCode === 429 || statusCode >= 500) {
-            resolve({ success: false, retryable: true, errorMessage: `Webhook returned ${statusCode}.` });
+            resolve({
+              success: false,
+              retryable: true,
+              errorMessage: `Webhook returned ${statusCode}.`,
+              nextAttemptAt: nextAttemptAt ?? this.computeNextAttemptTime(1),
+            });
             return;
           }
 
@@ -290,19 +441,38 @@ export class NotificationDeliveryService {
 
       req.on('error', (error) => {
         const message = error instanceof Error ? error.message : 'Unknown webhook failure';
-        const errorCode = error && typeof error === 'object' && 'code' in error ? String((error as NodeJS.ErrnoException).code ?? '') : undefined;
-        const retryable = this.isTransientWebhookError(message, errorCode);
-
+        const code = typeof error === 'object' && error && 'code' in error ? String((error as NodeJS.ErrnoException).code ?? '') : undefined;
+        const retryable = this.isTransientWebhookError(message, code);
         resolve({
           success: false,
           retryable,
           errorMessage: retryable ? 'Webhook delivery failed transiently.' : message,
+          nextAttemptAt: retryable ? this.computeNextAttemptTime(1) : undefined,
         });
       });
 
       req.write(body);
       req.end();
     });
+  }
+
+  private parseRetryAfterToMs(value: string | string[] | undefined): number | null {
+    if (!value) {
+      return null;
+    }
+
+    const candidate = Array.isArray(value) ? value[0] : value;
+    if (!candidate) {
+      return null;
+    }
+
+    const seconds = Number(candidate);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      const capped = Math.min(Math.max(seconds, 0), 60 * 60);
+      return capped * 1000;
+    }
+
+    return null;
   }
 
   private async resolvePinnedAddress(hostname: string): Promise<string> {
@@ -328,9 +498,22 @@ export class NotificationDeliveryService {
     return this.targetAddressService.normalizeAddress(addresses[0].address);
   }
 
+  private truncate(value: string | null | undefined, maxLength: number): string {
+    const normalized = String(value ?? '').trim();
+    if (normalized.length <= maxLength) {
+      return normalized;
+    }
+    return `${normalized.slice(0, Math.max(0, maxLength - 1))}…`;
+  }
+
   private isTransientWebhookError(message: string, code?: string): boolean {
     const upper = `${message} ${code ?? ''}`.toUpperCase();
-    return upper.includes('TIMEOUT') || upper.includes('ENOTFOUND') || upper.includes('EAI_AGAIN') || upper.includes('ECONNRESET') || upper.includes('ECONNREFUSED') || upper.includes('CERT') || upper.includes('TLS');
+    return upper.includes('TIMEOUT') || upper.includes('ENOTFOUND') || upper.includes('EAI_AGAIN') || upper.includes('ECONNRESET') || upper.includes('ECONNREFUSED') || upper.includes('CERT') || upper.includes('TLS') || upper.includes('ECONNABORTED');
+  }
+
+  private isPermanentDeliveryFailure(message: string): boolean {
+    const upper = message.toUpperCase();
+    return upper.includes('MALFORMED') || upper.includes('INVALID') || upper.includes('UNUSABLE') || upper.includes('OWNERSHIP') || upper.includes('PASSWORD') || upper.includes('URL');
   }
 
   private computeNextAttemptTime(attemptNumber: number): Date {

@@ -7,9 +7,12 @@ import { NotificationDeliveryService } from './notification-delivery.service.js'
 import { NotificationQueueService } from './notification-queue.service.js';
 import { NotificationSchedulerService } from './notification-scheduler.service.js';
 import { NotificationSecretService } from './notification-secret.service.js';
+import { NotificationsController } from './notifications.controller.js';
+import { NotificationsService } from './notifications.service.js';
 
 @Module({
   imports: [ConfigModule, DatabaseModule],
+  controllers: [NotificationsController],
   providers: [
     DnsResolverService,
     TargetAddressService,
@@ -17,6 +20,7 @@ import { NotificationSecretService } from './notification-secret.service.js';
     NotificationQueueService,
     NotificationDeliveryService,
     NotificationSchedulerService,
+    NotificationsService,
   ],
   exports: [
     DnsResolverService,
@@ -24,6 +28,7 @@ import { NotificationSecretService } from './notification-secret.service.js';
     NotificationSecretService,
     NotificationQueueService,
     NotificationDeliveryService,
+    NotificationsService,
   ],
 })
 export class NotificationsModule {}
