@@ -1,5 +1,31 @@
-import { describe, expect, it } from 'vitest';
+import { BadRequestException } from '@nestjs/common';
+import { describe, expect, it, vi } from 'vitest';
+import { NotificationsService } from './notifications.service.js';
 import { NotificationSecretService } from './notification-secret.service.js';
+
+describe('NotificationsService', () => {
+  it('rejects unsupported delivery status values and applies the default delivery limit', async () => {
+    const prisma = {
+      notificationDelivery: {
+        findMany: vi.fn(async () => []),
+      },
+    } as any;
+
+    const service = new NotificationsService(prisma, {
+      encryptEndpoint: (value: string) => value,
+      decryptEndpoint: (value: string) => value,
+    } as never);
+
+    await expect(service.listDeliveriesForUser('user-1', 'invalid', 50)).rejects.toThrow(BadRequestException);
+    await expect(service.listDeliveriesForUser('user-1', undefined, undefined as never)).resolves.toEqual([]);
+    expect(prisma.notificationDelivery.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: { userId: 'user-1' },
+        take: 50,
+      }),
+    );
+  });
+});
 
 describe('NotificationSecretService', () => {
   it('encrypts/decrypts round trip with a new IV and verifies authentication', async () => {

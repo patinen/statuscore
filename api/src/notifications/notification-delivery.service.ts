@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma, type NotificationChannel, type NotificationDeliveryEventType, type NotificationDeliveryStatus, type Incident, type Monitor, type User } from '@prisma/client';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
@@ -151,7 +151,7 @@ export class NotificationDeliveryService {
 
       const endpoint = this.notificationSecretService.decryptEndpoint(delivery.channel.endpointEncrypted);
       const payload = this.buildPayload(delivery);
-      const result = await this.sendWebhook(endpoint, payload, delivery.id, delivery.eventType, delivery.channel.type);
+      const result = await this.sendWebhook(endpoint, payload, delivery.id, delivery.eventType, delivery.channel.type, attemptNumber);
 
       if (result.success) {
         await this.prisma.notificationDelivery.update({
@@ -209,22 +209,23 @@ export class NotificationDeliveryService {
     }
   }
 
-  async listForUser(userId: string, status: string | undefined, limit: number) {
-    const normalizedStatus = status?.toLowerCase();
+  async listForUser(userId: string, status: string | undefined, limit = 50) {
+    const normalizedStatus = status?.toLowerCase() ?? 'all';
     const allowed = new Set(['all', 'pending', 'sent', 'failed']);
-    if (normalizedStatus && !allowed.has(normalizedStatus)) {
-      throw new Error('status must be one of: all, pending, sent, failed.');
+    if (!allowed.has(normalizedStatus)) {
+      throw new BadRequestException('status must be one of: all, pending, sent, failed.');
     }
 
+    const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(Number(limit), 1), 100) : 50;
     const where: Prisma.NotificationDeliveryWhereInput = { userId };
-    if (normalizedStatus && normalizedStatus !== 'all') {
+    if (normalizedStatus !== 'all') {
       where.status = normalizedStatus.toUpperCase() as NotificationDeliveryStatus;
     }
 
     const deliveries = await this.prisma.notificationDelivery.findMany({
       where,
       orderBy: { createdAt: 'desc' },
-      take: Math.min(Math.max(limit, 1), 100),
+      take: safeLimit,
       include: {
         incident: { include: { monitor: { select: { name: true } } } },
       },
@@ -293,6 +294,7 @@ export class NotificationDeliveryService {
     deliveryId: string,
     eventType: NotificationDeliveryEventType,
     channelType: NotificationChannel['type'],
+    attemptNumber: number,
   ): Promise<DeliveryResult> {
     const parsed = new URL(endpoint);
 
@@ -310,7 +312,7 @@ export class NotificationDeliveryService {
         'X-StatusCore-Event': eventType === 'INCIDENT_OPENED' ? 'incident.opened' : 'incident.resolved',
         'X-StatusCore-Delivery': deliveryId,
         'Content-Type': 'application/json',
-      }, 'discord');
+      }, 'discord', attemptNumber);
     }
 
     const eventName = eventType === 'INCIDENT_OPENED' ? 'incident.opened' : 'incident.resolved';
@@ -321,7 +323,7 @@ export class NotificationDeliveryService {
       'User-Agent': 'StatusCore/1.0',
       'X-StatusCore-Event': eventName,
       'X-StatusCore-Delivery': deliveryId,
-    }, 'generic');
+    }, 'generic', attemptNumber);
   }
 
   private buildDiscordPayload(eventType: NotificationDeliveryEventType, payload: Record<string, unknown>, deliveryId: string) {
@@ -376,6 +378,7 @@ export class NotificationDeliveryService {
     body: string,
     extraHeaders: Record<string, string>,
     type: 'generic' | 'discord',
+    attemptNumber: number,
   ): Promise<DeliveryResult> {
     const resolvedAddress = await this.resolvePinnedAddress(parsed.hostname);
     const requestHeaders = {
@@ -421,7 +424,7 @@ export class NotificationDeliveryService {
               success: false,
               retryable: true,
               errorMessage: `Webhook returned ${statusCode}.`,
-              nextAttemptAt: nextAttemptAt ?? this.computeNextAttemptTime(1),
+              nextAttemptAt: nextAttemptAt ?? this.computeNextAttemptTime(attemptNumber),
             });
             return;
           }
@@ -447,7 +450,7 @@ export class NotificationDeliveryService {
           success: false,
           retryable,
           errorMessage: retryable ? 'Webhook delivery failed transiently.' : message,
-          nextAttemptAt: retryable ? this.computeNextAttemptTime(1) : undefined,
+          nextAttemptAt: retryable ? this.computeNextAttemptTime(attemptNumber) : undefined,
         });
       });
 
@@ -517,8 +520,13 @@ export class NotificationDeliveryService {
   }
 
   private computeNextAttemptTime(attemptNumber: number): Date {
-    const delays = [30000, 60000, 300000, 900000];
-    const delayMs = delays[Math.min(attemptNumber - 1, delays.length - 1)] ?? 900000;
+    const schedule = {
+      1: 30_000,
+      2: 60_000,
+      3: 300_000,
+      4: 900_000,
+    } as const;
+    const delayMs = schedule[attemptNumber as keyof typeof schedule] ?? 900_000;
     return new Date(Date.now() + delayMs);
   }
 }

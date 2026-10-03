@@ -86,23 +86,25 @@ export class NotificationsService {
     NotificationsService.validateWebhookUrl(data.type, data.url);
     await NotificationsService.validateMonitorIds(this.prisma, userId, data.monitorIds);
 
-    const endpointEncrypted = this.secretService.encryptEndpoint(data.url.trim());
-    const channel = await this.prisma.notificationChannel.create({
-      data: {
-        userId,
-        name: data.name.trim(),
-        type: data.type,
-        endpointEncrypted,
-        enabled: true,
-      },
-    });
+    return this.prisma.$transaction(async (tx) => {
+      const endpointEncrypted = this.secretService.encryptEndpoint(data.url.trim());
+      const channel = await tx.notificationChannel.create({
+        data: {
+          userId,
+          name: data.name.trim(),
+          type: data.type,
+          endpointEncrypted,
+          enabled: true,
+        },
+      });
 
-    await this.prisma.monitorNotificationChannel.createMany({
-      data: data.monitorIds.map((monitorId) => ({ monitorId, channelId: channel.id })),
-      skipDuplicates: true,
-    });
+      await tx.monitorNotificationChannel.createMany({
+        data: data.monitorIds.map((monitorId) => ({ monitorId, channelId: channel.id })),
+        skipDuplicates: true,
+      });
 
-    return this.serializeChannel(channel, data.monitorIds);
+      return this.serializeChannel(channel, data.monitorIds);
+    });
   }
 
   async updateForUser(userId: string, channelId: string, data: UpdateNotificationChannelDto) {
@@ -115,31 +117,40 @@ export class NotificationsService {
       throw new NotFoundException('Notification channel not found.');
     }
 
-    let nextUrl = channel.endpointEncrypted;
     if (data.url) {
       NotificationsService.validateWebhookUrl(channel.type, data.url);
-      nextUrl = this.secretService.encryptEndpoint(data.url.trim());
     }
 
     if (data.monitorIds) {
       await NotificationsService.validateMonitorIds(this.prisma, userId, data.monitorIds);
-      await this.prisma.monitorNotificationChannel.deleteMany({ where: { channelId } });
-      await this.prisma.monitorNotificationChannel.createMany({
-        data: data.monitorIds.map((monitorId) => ({ monitorId, channelId })),
-      });
     }
 
-    const updated = await this.prisma.notificationChannel.update({
-      where: { id: channelId },
-      data: {
-        ...(data.name !== undefined ? { name: data.name.trim() } : {}),
-        ...(data.enabled !== undefined ? { enabled: data.enabled } : {}),
-        ...(data.url !== undefined ? { endpointEncrypted: nextUrl } : {}),
-      },
-      include: { monitorAssociations: { select: { monitorId: true } } },
-    });
+    return this.prisma.$transaction(async (tx) => {
+      let nextUrl = channel.endpointEncrypted;
+      if (data.url) {
+        nextUrl = this.secretService.encryptEndpoint(data.url.trim());
+      }
 
-    return this.serializeChannel(updated, updated.monitorAssociations.map((row) => row.monitorId));
+      const updated = await tx.notificationChannel.update({
+        where: { id: channelId },
+        data: {
+          ...(data.name !== undefined ? { name: data.name.trim() } : {}),
+          ...(data.enabled !== undefined ? { enabled: data.enabled } : {}),
+          ...(data.url !== undefined ? { endpointEncrypted: nextUrl } : {}),
+        },
+        include: { monitorAssociations: { select: { monitorId: true } } },
+      });
+
+      if (data.monitorIds) {
+        await tx.monitorNotificationChannel.deleteMany({ where: { channelId } });
+        await tx.monitorNotificationChannel.createMany({
+          data: data.monitorIds.map((monitorId) => ({ monitorId, channelId })),
+          skipDuplicates: true,
+        });
+      }
+
+      return this.serializeChannel(updated, (data.monitorIds ?? updated.monitorAssociations.map((row) => row.monitorId)));
+    });
   }
 
   async deleteForUser(userId: string, channelId: string): Promise<void> {
@@ -151,17 +162,24 @@ export class NotificationsService {
     await this.prisma.notificationChannel.delete({ where: { id: channelId } });
   }
 
-  async listDeliveriesForUser(userId: string, status: string | undefined, limit: number) {
-    const normalizedStatus = status?.toLowerCase();
+  async listDeliveriesForUser(userId: string, status: string | undefined, limit = 50) {
+    const normalizedStatus = status?.toLowerCase() ?? 'all';
+    const allowedStatuses = new Set(['all', 'pending', 'sent', 'failed']);
+
+    if (!allowedStatuses.has(normalizedStatus)) {
+      throw new BadRequestException('status must be one of: all, pending, sent, failed.');
+    }
+
+    const safeLimit = Number.isFinite(limit) ? Math.min(Math.max(Number(limit), 1), 100) : 50;
     const where: Prisma.NotificationDeliveryWhereInput = { userId };
-    if (normalizedStatus && normalizedStatus !== 'all') {
+    if (normalizedStatus !== 'all') {
       where.status = normalizedStatus.toUpperCase() as NotificationDeliveryStatus;
     }
 
     const rows = await this.prisma.notificationDelivery.findMany({
       where,
       orderBy: { createdAt: 'desc' },
-      take: Math.min(Math.max(limit, 1), 100),
+      take: safeLimit,
       include: {
         incident: { include: { monitor: { select: { id: true, name: true } } } },
       },

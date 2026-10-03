@@ -3,8 +3,7 @@ import { ConfigModule } from '@nestjs/config';
 import { DatabaseModule } from './database/database.module.js';
 import { MonitoringModule } from './monitoring/monitoring.module.js';
 import { MonitoringWorkerService } from './monitoring/monitoring-worker.service.js';
-import { NotificationsModule } from './notifications/notifications.module.js';
-import { NotificationWorkerService } from './notifications/notification-worker.service.js';
+import { NotificationWorkerModule } from './notifications/notification-worker.module.js';
 
 @Module({
   imports: [
@@ -14,8 +13,8 @@ import { NotificationWorkerService } from './notifications/notification-worker.s
     }),
     DatabaseModule,
     MonitoringModule,
-    NotificationsModule,
+    NotificationWorkerModule,
   ],
-  providers: [MonitoringWorkerService, NotificationWorkerService],
+  providers: [MonitoringWorkerService],
 })
 export class WorkerModule {}

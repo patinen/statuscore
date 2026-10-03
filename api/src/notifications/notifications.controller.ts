@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -10,6 +9,8 @@ import {
   Query,
   Req,
   UseGuards,
+  UsePipes,
+  ValidationPipe,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { AuthGuard } from '../auth/auth.guard.js';
@@ -43,15 +44,20 @@ export class NotificationsController {
   }
 
   @Get('notification-deliveries')
+  @UsePipes(
+    new ValidationPipe({
+      transform: true,
+      whitelist: true,
+      forbidNonWhitelisted: true,
+      errorHttpStatusCode: 400,
+    }),
+  )
   listDeliveries(
     @Req() req: Request & { user: SessionUser },
-    @Query('status') status: string | undefined,
-    @Query('limit') limit?: string,
+    @Query() query: NotificationDeliveryQueryDto,
   ) {
-    const parsedLimit = limit ? Number(limit) : 50;
-    if (!Number.isInteger(parsedLimit) || parsedLimit < 1 || parsedLimit > 100) {
-      throw new BadRequestException('limit must be an integer between 1 and 100.');
-    }
-    return this.notificationsService.listDeliveriesForUser(req.user.id, status, parsedLimit);
+    const status = query.status ?? 'all';
+    const limit = query.limit ?? 50;
+    return this.notificationsService.listDeliveriesForUser(req.user.id, status, limit);
   }
 }

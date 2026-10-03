@@ -46,6 +46,27 @@ type MonitorCheckHistoryItem = {
 };
 
 type IncidentStatus = "all" | "open" | "resolved";
+type NotificationDeliveryStatus = "all" | "pending" | "sent" | "failed";
+
+type NotificationDeliveryRecord = {
+  id: string;
+  eventType: "INCIDENT_OPENED" | "INCIDENT_RESOLVED";
+  status: "PENDING" | "SENT" | "FAILED";
+  attemptCount: number;
+  channel: {
+    id: string;
+    name: string;
+    type: string;
+  } | null;
+  monitor: {
+    id: string;
+    name: string;
+  } | null;
+  lastAttemptAt: string | null;
+  sentAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+};
 
 type IncidentRecord = {
   id: string;
@@ -140,7 +161,9 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [monitors, setMonitors] = useState<Monitor[]>([]);
   const [incidents, setIncidents] = useState<IncidentRecord[]>([]);
+  const [notifications, setNotifications] = useState<NotificationDeliveryRecord[]>([]);
   const [incidentFilter, setIncidentFilter] = useState<IncidentStatus>("all");
+  const [notificationFilter, setNotificationFilter] = useState<NotificationDeliveryStatus>("all");
   const [recentChecks, setRecentChecks] = useState<Record<string, MonitorCheckHistoryItem[]>>({});
   const [isLoadingChecks, setIsLoadingChecks] = useState<Record<string, boolean>>({});
   const [expandedMonitorId, setExpandedMonitorId] = useState<string | null>(null);
@@ -200,14 +223,16 @@ export default function Home() {
 
     const loadDashboard = async () => {
       try {
-        const [list, incidentList] = await Promise.all([
+        const [list, incidentList, notificationList] = await Promise.all([
           apiRequest<Monitor[]>('/monitors'),
           apiRequest<IncidentRecord[]>(`/incidents?status=${incidentFilter}&limit=50`),
+          apiRequest<NotificationDeliveryRecord[]>(`/notification-deliveries?status=${notificationFilter}&limit=10`),
         ]);
 
         if (!cancelled) {
           setMonitors(list ?? []);
           setIncidents(incidentList ?? []);
+          setNotifications(notificationList ?? []);
           setError(null);
         }
       } catch (pollError) {
@@ -226,7 +251,7 @@ export default function Home() {
       cancelled = true;
       clearInterval(intervalId);
     };
-  }, [user, incidentFilter]);
+  }, [user, incidentFilter, notificationFilter]);
 
   const resetForm = () => {
     setForm(defaultForm);
@@ -570,6 +595,69 @@ export default function Home() {
                 ) : null}
 
                 <div className="space-y-6">
+                  <div className="rounded-lg border border-zinc-700 bg-zinc-950/40 p-5">
+                    <div className="mb-4 flex items-center justify-between gap-3">
+                      <h2 className="text-xl font-medium text-zinc-50">Recent notifications</h2>
+                      <div className="flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900 p-1">
+                        {(['all', 'pending', 'sent', 'failed'] as NotificationDeliveryStatus[]).map((status) => (
+                          <button
+                            key={status}
+                            type="button"
+                            onClick={() => setNotificationFilter(status)}
+                            className={[
+                              'rounded-full px-3 py-1.5 text-[10px] font-medium uppercase tracking-[0.15em] transition',
+                              notificationFilter === status
+                                ? 'bg-emerald-500 text-slate-950'
+                                : 'text-zinc-300 hover:text-zinc-100',
+                            ].join(' ')}
+                          >
+                            {status}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {notifications.length === 0 ? (
+                      <div className="text-sm text-zinc-400">No notification deliveries match the selected filter.</div>
+                    ) : (
+                      <div className="space-y-3">
+                        {notifications.map((delivery) => (
+                          <div key={delivery.id} className="rounded-md border border-zinc-700 bg-zinc-950/70 p-3">
+                            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                              <div className="text-sm font-medium text-zinc-100">
+                                {delivery.monitor?.name ?? 'Monitoring event'}
+                              </div>
+                              <span
+                                className={[
+                                  'inline-flex w-fit rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.2em]',
+                                  delivery.status === 'SENT'
+                                    ? 'border border-emerald-500/50 bg-emerald-500/10 text-emerald-300'
+                                    : delivery.status === 'FAILED'
+                                      ? 'border border-red-500/50 bg-red-500/10 text-red-300'
+                                      : 'border border-amber-500/50 bg-amber-500/10 text-amber-300',
+                                ].join(' ')}
+                              >
+                                {delivery.status.toLowerCase()}
+                              </span>
+                            </div>
+                            <div className="mt-2 flex flex-wrap gap-3 text-xs text-zinc-400">
+                              <span>Type: {delivery.eventType === 'INCIDENT_OPENED' ? 'Incident opened' : 'Incident resolved'}</span>
+                              <span>Channel: {delivery.channel?.name ?? 'Unknown channel'}</span>
+                              <span>Attempts: {delivery.attemptCount}</span>
+                            </div>
+                            <div className="mt-2 text-xs text-zinc-400">
+                              Created: {new Date(delivery.createdAt).toLocaleString()}
+                              {delivery.sentAt ? ` · Sent: ${new Date(delivery.sentAt).toLocaleString()}` : ''}
+                            </div>
+                            {delivery.lastError ? (
+                              <div className="mt-2 text-xs text-zinc-300">Last error: {delivery.lastError}</div>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
                   <div className="rounded-lg border border-zinc-700 bg-zinc-950/40 p-5">
                     <div className="mb-4 flex items-center justify-between gap-3">
                       <h2 className="text-xl font-medium text-zinc-50">Incidents</h2>

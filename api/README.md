@@ -1,6 +1,6 @@
 # StatusCore API
 
-This is the NestJS API for StatusCore. It handles GitHub authentication, monitor management, scheduling, queue processing, and secure outbound HTTP checks.
+This is the NestJS API for StatusCore. It handles GitHub authentication, monitor management, scheduling, queue processing, notification channel ownership, and secure outbound HTTP checks.
 
 ## Scripts
 
@@ -9,7 +9,12 @@ This is the NestJS API for StatusCore. It handles GitHub authentication, monitor
 - `npm run build`
 - `npm run test`
 - `npm run db:generate`
+- `npm run db:deploy`
 
 ## Worker configuration
 
-The background monitor worker uses `MONITOR_WORKER_CONCURRENCY` to control how many queue jobs run concurrently. The worker must not start the API scheduler or HTTP server.
+The background monitoring worker uses `MONITOR_WORKER_CONCURRENCY` to control how many queue jobs run concurrently. The separate notification worker uses `NOTIFICATION_WORKER_CONCURRENCY` for outbound delivery processing. Both workers must not start the API scheduler or HTTP server.
+
+## Phase 5 notification model
+
+The API creates `NotificationDelivery` rows in the same transaction that records incident transitions. Those rows are then drained by the notification queue and sent asynchronously to configured webhook or Discord endpoints. Endpoint secrets are encrypted with the configured `NOTIFICATION_ENCRYPTION_KEY`, and the notification worker enforces public HTTPS-only validation, DNS/IP pinning, and blocked-address checks before making outbound requests.
