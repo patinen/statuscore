@@ -1,6 +1,7 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { ManualIncidentImpact, ManualIncidentStatus, Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service.js';
+import { NotificationDeliveryService } from '../notifications/notification-delivery.service.js';
 import {
   CreateManualIncidentDto,
   CreateManualIncidentUpdateDto,
@@ -39,7 +40,10 @@ type ManualIncidentRecord = {
 
 @Injectable()
 export class ManualIncidentsService {
-  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(NotificationDeliveryService) private readonly notificationDeliveryService?: NotificationDeliveryService,
+  ) {}
 
   static validateStatus(status: string | undefined): ManualIncidentListStatus {
     if (status === undefined) {
@@ -197,7 +201,7 @@ export class ManualIncidentsService {
         skipDuplicates: true,
       });
 
-      await tx.manualIncidentUpdate.create({
+      const initialUpdate = await tx.manualIncidentUpdate.create({
         data: {
           manualIncidentId: incident.id,
           status: ManualIncidentStatus.INVESTIGATING,
@@ -205,6 +209,24 @@ export class ManualIncidentsService {
           createdAt: startedAt,
         },
       });
+
+      if (this.notificationDeliveryService) {
+        await this.notificationDeliveryService.createForManualIncidentUpdate(tx, userId, {
+          manualIncidentId: incident.id,
+          manualIncidentUpdateId: initialUpdate.id,
+          eventType: 'MANUAL_INCIDENT_OPENED',
+          title,
+          impact: data.impact,
+          incidentStatus: ManualIncidentStatus.INVESTIGATING,
+          updateStatus: ManualIncidentStatus.INVESTIGATING,
+          updateMessage: message,
+          startedAt,
+          resolvedAt: null,
+          eventTimestamp: startedAt,
+          monitorIds: monitors.map((monitor) => monitor.id),
+          monitorNames: monitors.map((monitor) => monitor.name),
+        });
+      }
 
       return incident;
     });
@@ -264,6 +286,9 @@ export class ManualIncidentsService {
         select: {
           id: true,
           status: true,
+          title: true,
+          impact: true,
+          startedAt: true,
         },
       });
 
@@ -293,7 +318,7 @@ export class ManualIncidentsService {
         throw new BadRequestException('Resolved manual incidents cannot be reopened in this phase.');
       }
 
-      await tx.manualIncidentUpdate.create({
+      const update = await tx.manualIncidentUpdate.create({
         data: {
           manualIncidentId: incidentId,
           status: data.status,
@@ -301,6 +326,38 @@ export class ManualIncidentsService {
           createdAt: timestamp,
         },
       });
+
+      if (this.notificationDeliveryService) {
+        const monitorAssociations = await tx.manualIncidentMonitor.findMany({
+          where: {
+            manualIncidentId: incidentId,
+          },
+          include: {
+            monitor: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+          },
+        });
+
+        await this.notificationDeliveryService.createForManualIncidentUpdate(tx, userId, {
+          manualIncidentId: incidentId,
+          manualIncidentUpdateId: update.id,
+          eventType: data.status === ManualIncidentStatus.RESOLVED ? 'MANUAL_INCIDENT_RESOLVED' : 'MANUAL_INCIDENT_UPDATED',
+          title: existing.title,
+          impact: existing.impact,
+          incidentStatus: data.status,
+          updateStatus: data.status,
+          updateMessage: message,
+          startedAt: existing.startedAt,
+          resolvedAt: data.status === ManualIncidentStatus.RESOLVED ? timestamp : null,
+          eventTimestamp: timestamp,
+          monitorIds: monitorAssociations.map((association) => association.monitorId),
+          monitorNames: monitorAssociations.map((association) => association.monitor.name),
+        });
+      }
     });
 
     return this.loadOwnedIncident(userId, incidentId);

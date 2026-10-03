@@ -190,11 +190,25 @@ export class NotificationsService {
       eventType: row.eventType,
       status: row.status,
       attemptCount: row.attemptCount,
+      occurredAt: row.occurredAt,
       sentAt: row.sentAt,
+      lastAttemptAt: row.lastAttemptAt,
       lastError: row.lastError,
       createdAt: row.createdAt,
       channel: row.channelName ? { id: row.channelId, name: row.channelName, type: row.channelType ?? 'WEBHOOK' } : null,
       monitor: row.incident ? { id: row.incident.monitor.id, name: row.incident.monitor.name } : null,
+      monitors: Array.isArray(row.monitorNamesSnapshot)
+        ? row.monitorNamesSnapshot.filter((value): value is string => typeof value === 'string')
+        : row.incident
+          ? [row.incident.monitor.name]
+          : [],
+      incident: {
+        type: row.eventType.startsWith('MANUAL_INCIDENT_') ? 'manual' : 'automatic',
+        title: row.incidentTitleSnapshot,
+        impact: row.incidentImpactSnapshot,
+        statusSnapshot: row.incidentStatusSnapshot,
+        messageSnapshot: row.updateMessageSnapshot,
+      },
     }));
   }
 

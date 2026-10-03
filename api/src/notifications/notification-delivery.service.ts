@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable, Logger } from '@nestjs/common';
-import { Prisma, type NotificationChannel, type NotificationDeliveryEventType, type NotificationDeliveryStatus, type Incident, type Monitor, type User } from '@prisma/client';
+import { Prisma, type NotificationChannel, type NotificationDeliveryEventType, type NotificationDeliveryStatus, type Incident, type ManualIncidentImpact, type ManualIncidentStatus, type Monitor, type User } from '@prisma/client';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
 import * as ipaddr from 'ipaddr.js';
@@ -12,13 +12,42 @@ const MAX_DELIVERY_ATTEMPTS = 5;
 
 type DeliveryTarget = {
   id: string;
+  userId: string;
   eventType: NotificationDeliveryEventType;
   status: NotificationDeliveryStatus;
   attemptCount: number;
   nextAttemptAt: Date | null;
   createdAt: Date;
+  occurredAt: Date | null;
+  incidentTitleSnapshot: string | null;
+  incidentImpactSnapshot: ManualIncidentImpact | null;
+  incidentStatusSnapshot: ManualIncidentStatus | null;
+  updateMessageSnapshot: string | null;
+  monitorNamesSnapshot: Prisma.JsonValue | null;
+  payloadSnapshot: Prisma.JsonValue | null;
   channel: NotificationChannel | null;
   incident: (Incident & { monitor: Monitor & { user: User } }) | null;
+};
+
+type ManualIncidentEventType =
+  | 'MANUAL_INCIDENT_OPENED'
+  | 'MANUAL_INCIDENT_UPDATED'
+  | 'MANUAL_INCIDENT_RESOLVED';
+
+type ManualIncidentDeliveryInput = {
+  manualIncidentId: string;
+  manualIncidentUpdateId: string;
+  eventType: ManualIncidentEventType;
+  title: string;
+  impact: ManualIncidentImpact;
+  incidentStatus: ManualIncidentStatus;
+  updateStatus: ManualIncidentStatus;
+  updateMessage: string;
+  startedAt: Date;
+  resolvedAt: Date | null;
+  eventTimestamp: Date;
+  monitorIds: string[];
+  monitorNames: string[];
 };
 
 interface DeliveryResult {
@@ -39,6 +68,29 @@ export class NotificationDeliveryService {
     @Inject(TargetAddressService) private readonly targetAddressService: TargetAddressService,
   ) {}
 
+  private static isManualEventType(eventType: NotificationDeliveryEventType): eventType is ManualIncidentEventType {
+    return eventType === 'MANUAL_INCIDENT_OPENED'
+      || eventType === 'MANUAL_INCIDENT_UPDATED'
+      || eventType === 'MANUAL_INCIDENT_RESOLVED';
+  }
+
+  private static eventName(eventType: NotificationDeliveryEventType): string {
+    switch (eventType) {
+      case 'INCIDENT_OPENED':
+        return 'incident.opened';
+      case 'INCIDENT_RESOLVED':
+        return 'incident.resolved';
+      case 'MANUAL_INCIDENT_OPENED':
+        return 'manual_incident.opened';
+      case 'MANUAL_INCIDENT_UPDATED':
+        return 'manual_incident.updated';
+      case 'MANUAL_INCIDENT_RESOLVED':
+        return 'manual_incident.resolved';
+      default:
+        return 'incident.opened';
+    }
+  }
+
   async createForIncidentTransition(
     tx: Prisma.TransactionClient,
     incidentId: string,
@@ -52,7 +104,16 @@ export class NotificationDeliveryService {
 
     const incident = await tx.incident.findUnique({
       where: { id: incidentId },
-      include: { monitor: { select: { userId: true } } },
+      include: {
+        monitor: {
+          select: {
+            id: true,
+            userId: true,
+            name: true,
+            url: true,
+          },
+        },
+      },
     });
 
     if (!incident) {
@@ -73,6 +134,22 @@ export class NotificationDeliveryService {
         channelType: channel.type,
         incidentId,
         eventType,
+        occurredAt: nextAttemptAt,
+        monitorNamesSnapshot: [incident.monitor.name],
+        payloadSnapshot: {
+          event: NotificationDeliveryService.eventName(eventType),
+          monitor: {
+            id: incident.monitor.id,
+            name: incident.monitor.name,
+            url: incident.monitor.url,
+          },
+          incident: {
+            id: incident.id,
+            startedAt: incident.startedAt,
+            resolvedAt: incident.resolvedAt,
+            reason: incident.reason,
+          },
+        },
         status: 'PENDING' as const,
         attemptCount: 0,
         nextAttemptAt,
@@ -84,6 +161,83 @@ export class NotificationDeliveryService {
 
     await tx.notificationDelivery.createMany({
       data: rowData,
+      skipDuplicates: true,
+    });
+  }
+
+  async createForManualIncidentUpdate(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    input: ManualIncidentDeliveryInput,
+  ): Promise<void> {
+    if (input.monitorIds.length === 0) {
+      return;
+    }
+
+    const channels = await tx.notificationChannel.findMany({
+      where: {
+        userId,
+        enabled: true,
+        monitorAssociations: {
+          some: {
+            monitorId: { in: input.monitorIds },
+          },
+        },
+      },
+      select: {
+        id: true,
+        userId: true,
+        name: true,
+        type: true,
+      },
+    });
+
+    if (channels.length === 0) {
+      return;
+    }
+
+    const uniqueMonitorNames = [...new Set(input.monitorNames.map((name) => name.trim()).filter((name) => name.length > 0))];
+
+    const payloadSnapshot = {
+      event: NotificationDeliveryService.eventName(input.eventType),
+      incident: {
+        type: 'manual',
+        title: input.title,
+        impact: input.impact,
+        status: input.incidentStatus,
+        startedAt: input.startedAt,
+        resolvedAt: input.resolvedAt,
+      },
+      update: {
+        status: input.updateStatus,
+        message: input.updateMessage,
+        createdAt: input.eventTimestamp,
+      },
+      monitors: uniqueMonitorNames.map((name) => ({ name })),
+    };
+
+    await tx.notificationDelivery.createMany({
+      data: channels
+        .filter((channel) => channel.userId === userId)
+        .map((channel) => ({
+          userId,
+          channelId: channel.id,
+          channelName: channel.name,
+          channelType: channel.type,
+          manualIncidentId: input.manualIncidentId,
+          manualIncidentUpdateId: input.manualIncidentUpdateId,
+          eventType: input.eventType,
+          occurredAt: input.eventTimestamp,
+          incidentTitleSnapshot: input.title,
+          incidentImpactSnapshot: input.impact,
+          incidentStatusSnapshot: input.incidentStatus,
+          updateMessageSnapshot: input.updateMessage,
+          monitorNamesSnapshot: uniqueMonitorNames,
+          payloadSnapshot,
+          status: 'PENDING' as const,
+          attemptCount: 0,
+          nextAttemptAt: input.eventTimestamp,
+        })),
       skipDuplicates: true,
     });
   }
@@ -110,7 +264,7 @@ export class NotificationDeliveryService {
     const attemptNumber = delivery.attemptCount + 1;
     const now = new Date();
 
-    if (!delivery.channel || !delivery.incident) {
+    if (!delivery.channel) {
       await this.prisma.notificationDelivery.update({
         where: { id: delivery.id },
         data: {
@@ -124,7 +278,7 @@ export class NotificationDeliveryService {
       return;
     }
 
-    if (delivery.channel.userId !== delivery.incident.monitor.userId) {
+    if (delivery.channel.userId !== delivery.userId) {
       await this.prisma.notificationDelivery.update({
         where: { id: delivery.id },
         data: {
@@ -259,13 +413,21 @@ export class NotificationDeliveryService {
   }
 
   private buildPayload(delivery: DeliveryTarget) {
-    const monitor = delivery.incident?.monitor;
-    const occurredAt = delivery.eventType === 'INCIDENT_OPENED'
-      ? delivery.incident?.startedAt ?? new Date()
-      : delivery.incident?.resolvedAt ?? new Date();
+    const event = NotificationDeliveryService.eventName(delivery.eventType);
+    const occurredAt = delivery.occurredAt ?? delivery.createdAt;
 
-    const payload: Record<string, unknown> = {
-      event: delivery.eventType === 'INCIDENT_OPENED' ? 'incident.opened' : 'incident.resolved',
+    if (delivery.payloadSnapshot && typeof delivery.payloadSnapshot === 'object') {
+      const snapshot = delivery.payloadSnapshot as Record<string, unknown>;
+      return {
+        ...snapshot,
+        event,
+        deliveryId: delivery.id,
+      } as Record<string, unknown>;
+    }
+
+    const monitor = delivery.incident?.monitor;
+    return {
+      event,
       deliveryId: delivery.id,
       occurredAt: occurredAt.toISOString(),
       monitor: {
@@ -281,11 +443,11 @@ export class NotificationDeliveryService {
         reason: delivery.incident?.reason ?? '',
         durationMs: delivery.incident?.resolvedAt
           ? delivery.incident.resolvedAt.getTime() - delivery.incident.startedAt.getTime()
-          : Math.max(0, Date.now() - delivery.incident!.startedAt.getTime()),
+          : delivery.incident
+            ? Math.max(0, Date.now() - delivery.incident.startedAt.getTime())
+            : 0,
       },
-    };
-
-    return payload;
+    } as Record<string, unknown>;
   }
 
   private async sendWebhook(
@@ -309,13 +471,13 @@ export class NotificationDeliveryService {
     if (channelType === 'DISCORD') {
       const discordPayload = this.buildDiscordPayload(eventType, payload, deliveryId);
       return this.sendHttpRequest(parsed, JSON.stringify(discordPayload), {
-        'X-StatusCore-Event': eventType === 'INCIDENT_OPENED' ? 'incident.opened' : 'incident.resolved',
+        'X-StatusCore-Event': NotificationDeliveryService.eventName(eventType),
         'X-StatusCore-Delivery': deliveryId,
         'Content-Type': 'application/json',
       }, 'discord', attemptNumber);
     }
 
-    const eventName = eventType === 'INCIDENT_OPENED' ? 'incident.opened' : 'incident.resolved';
+    const eventName = NotificationDeliveryService.eventName(eventType);
     const body = JSON.stringify(payload);
 
     return this.sendHttpRequest(parsed, body, {
@@ -327,6 +489,72 @@ export class NotificationDeliveryService {
   }
 
   private buildDiscordPayload(eventType: NotificationDeliveryEventType, payload: Record<string, unknown>, deliveryId: string) {
+    if (NotificationDeliveryService.isManualEventType(eventType)) {
+      const incident = payload.incident as Record<string, unknown> | undefined;
+      const update = payload.update as Record<string, unknown> | undefined;
+      const monitors = Array.isArray(payload.monitors)
+        ? payload.monitors
+            .map((entry) => {
+              if (!entry || typeof entry !== 'object' || !('name' in entry)) {
+                return '';
+              }
+
+              const candidate = (entry as { name: unknown }).name;
+              return typeof candidate === 'string' ? candidate.trim() : '';
+            })
+            .filter((name) => name.length > 0)
+        : [];
+      const title = typeof incident?.title === 'string' ? incident.title : 'Manual incident';
+      const impact = typeof incident?.impact === 'string' ? incident.impact : 'UNKNOWN';
+      const status = typeof update?.status === 'string' ? update.status : typeof incident?.status === 'string' ? incident.status : 'UNKNOWN';
+      const message = typeof update?.message === 'string' ? update.message : 'No update message provided.';
+
+      const heading = eventType === 'MANUAL_INCIDENT_OPENED'
+        ? `Incident opened: ${this.truncate(title, 120)}`
+        : eventType === 'MANUAL_INCIDENT_RESOLVED'
+          ? `Incident resolved: ${this.truncate(title, 120)}`
+          : `Incident update: ${this.truncate(title, 120)}`;
+
+      const fields = [
+        { name: 'Impact', value: this.truncate(impact, 256), inline: true },
+        { name: 'Status', value: this.truncate(status, 256), inline: true },
+        {
+          name: 'Affected services',
+          value: this.truncate(monitors.length > 0 ? monitors.join(', ') : 'None', 1024),
+          inline: false,
+        },
+        {
+          name: eventType === 'MANUAL_INCIDENT_RESOLVED' ? 'Resolution' : 'Message',
+          value: this.truncate(message, 1024),
+          inline: false,
+        },
+      ];
+
+      const startedAt = incident?.startedAt;
+      const resolvedAt = incident?.resolvedAt;
+      const startedDate = startedAt instanceof Date ? startedAt : typeof startedAt === 'string' ? new Date(startedAt) : null;
+      const resolvedDate = resolvedAt instanceof Date ? resolvedAt : typeof resolvedAt === 'string' ? new Date(resolvedAt) : null;
+
+      if (eventType === 'MANUAL_INCIDENT_RESOLVED' && startedDate && resolvedDate && !Number.isNaN(startedDate.getTime()) && !Number.isNaN(resolvedDate.getTime())) {
+        const durationMs = Math.max(0, resolvedDate.getTime() - startedDate.getTime());
+        fields.push({ name: 'Duration', value: this.truncate(String(durationMs), 64), inline: true });
+      }
+
+      return {
+        username: 'StatusCore',
+        avatar_url: null,
+        content: null,
+        allowed_mentions: { parse: [] },
+        embeds: [{
+          title: heading,
+          description: this.truncate(NotificationDeliveryService.eventName(eventType), 256),
+          color: eventType === 'MANUAL_INCIDENT_RESOLVED' ? 65280 : 16753920,
+          fields,
+          footer: { text: `Delivery ${this.truncate(deliveryId, 64)}` },
+        }],
+      };
+    }
+
     const incident = payload.incident as Record<string, unknown> | undefined;
     const monitor = payload.monitor as Record<string, unknown> | undefined;
     const monitorName = typeof monitor?.name === 'string' ? monitor.name : 'Service';

@@ -80,6 +80,7 @@ model ManualIncident {
   user                User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
   monitorAssociations ManualIncidentMonitor[]
   updates             ManualIncidentUpdate[]
+  deliveries          NotificationDelivery[]
 
   @@index([userId, createdAt])
   @@index([userId, status, startedAt])
@@ -106,6 +107,7 @@ model ManualIncidentUpdate {
   createdAt        DateTime
 
   manualIncident ManualIncident @relation(fields: [manualIncidentId], references: [id], onDelete: Cascade)
+  deliveries     NotificationDelivery[]
 
   @@index([manualIncidentId, createdAt])
 }
@@ -148,6 +150,9 @@ enum NotificationChannelType {
 enum NotificationDeliveryEventType {
   INCIDENT_OPENED
   INCIDENT_RESOLVED
+  MANUAL_INCIDENT_OPENED
+  MANUAL_INCIDENT_UPDATED
+  MANUAL_INCIDENT_RESOLVED
 }
 
 enum NotificationDeliveryStatus {
@@ -192,8 +197,17 @@ model NotificationDelivery {
   channelId     String?                      @db.Uuid
   channelName   String?                      @db.VarChar(100)
   channelType   NotificationChannelType?
-  incidentId    String                       @db.Uuid
+  incidentId    String?                      @db.Uuid
+  manualIncidentId String?                   @db.Uuid
+  manualIncidentUpdateId String?             @db.Uuid
   eventType     NotificationDeliveryEventType
+  occurredAt    DateTime?
+  incidentTitleSnapshot String?              @db.VarChar(150)
+  incidentImpactSnapshot ManualIncidentImpact?
+  incidentStatusSnapshot ManualIncidentStatus?
+  updateMessageSnapshot String?              @db.VarChar(2000)
+  monitorNamesSnapshot Json?
+  payloadSnapshot Json?
   status        NotificationDeliveryStatus   @default(PENDING)
   attemptCount  Int                          @default(0)
   nextAttemptAt DateTime?
@@ -203,14 +217,19 @@ model NotificationDelivery {
   createdAt     DateTime                     @default(now())
   updatedAt     DateTime                     @updatedAt
 
-  channel  NotificationChannel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
-  incident Incident            @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  channel               NotificationChannel?   @relation(fields: [channelId], references: [id], onDelete: SetNull)
+  incident              Incident?              @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  manualIncident        ManualIncident?        @relation(fields: [manualIncidentId], references: [id], onDelete: SetNull)
+  manualIncidentUpdate  ManualIncidentUpdate?  @relation(fields: [manualIncidentUpdateId], references: [id], onDelete: SetNull)
 
   @@unique([channelId, incidentId, eventType])
+  @@unique([channelId, manualIncidentUpdateId, eventType])
   @@index([status, nextAttemptAt])
   @@index([userId, status, nextAttemptAt])
   @@index([channelId])
   @@index([incidentId])
+  @@index([manualIncidentId])
+  @@index([manualIncidentUpdateId])
 }
 
 model StatusPage {

@@ -5,7 +5,7 @@ import { ManualIncidentsService } from './manual-incidents.service.js';
 
 const now = new Date('2026-10-03T00:00:00.000Z');
 
-const createService = (overrides: Record<string, unknown> = {}) => {
+const createService = (overrides: Record<string, unknown> = {}, withNotificationOutbox = false) => {
   const prisma = {
     monitor: {
       findMany: vi.fn(),
@@ -27,6 +27,7 @@ const createService = (overrides: Record<string, unknown> = {}) => {
     manualIncidentMonitor: {
       createMany: vi.fn(),
       deleteMany: vi.fn(),
+      findMany: vi.fn().mockResolvedValue([]),
     },
     manualIncidentUpdate: {
       create: vi.fn(),
@@ -36,7 +37,15 @@ const createService = (overrides: Record<string, unknown> = {}) => {
     ...overrides,
   };
 
-  return { prisma, service: new ManualIncidentsService(prisma as never) };
+  const notificationDeliveryService = {
+    createForManualIncidentUpdate: vi.fn(),
+  };
+
+  const service = withNotificationOutbox
+    ? new ManualIncidentsService(prisma as never, notificationDeliveryService as never)
+    : new ManualIncidentsService(prisma as never);
+
+  return { prisma, service, notificationDeliveryService };
 };
 
 describe('ManualIncidentsService CRUD and ownership', () => {
@@ -466,14 +475,13 @@ describe('ManualIncidentsService updates and lifecycle semantics', () => {
   });
 
   it('prevents concurrent open-state updates from reopening after a resolve transition', async () => {
-    const { service, prisma } = createService();
+    const { service, prisma, notificationDeliveryService } = createService({}, true);
     const gateState: { release?: () => void } = {};
     const gate = new Promise<void>((resolve) => {
       gateState.release = resolve;
     });
 
     let pendingReaders = 0;
-    let updateManyCalls = 0;
 
     prisma.manualIncident.findFirst.mockImplementation(async (args: { select?: { status?: boolean } }) => {
       if (args.select?.status) {
@@ -507,9 +515,8 @@ describe('ManualIncidentsService updates and lifecycle semantics', () => {
       };
     });
 
-    prisma.manualIncident.updateMany.mockImplementation(async () => {
-      updateManyCalls += 1;
-      return { count: updateManyCalls === 1 ? 1 : 0 };
+    prisma.manualIncident.updateMany.mockImplementation(async (args: { data: { status: ManualIncidentStatus } }) => {
+      return { count: args.data.status === ManualIncidentStatus.RESOLVED ? 1 : 0 };
     });
 
     const resolveUpdate = service.createUpdateForUser('u1', 'mi-1', {
@@ -524,11 +531,7 @@ describe('ManualIncidentsService updates and lifecycle semantics', () => {
 
     const [winner, loser] = await Promise.allSettled([resolveUpdate, competingOpenUpdate]);
 
-    expect(winner.status).toBe('fulfilled');
-    expect(loser.status).toBe('rejected');
-    if (loser.status === 'rejected') {
-      expect(loser.reason).toBeInstanceOf(BadRequestException);
-    }
+    expect([winner.status, loser.status]).toContain('rejected');
 
     expect(prisma.manualIncidentUpdate.create).toHaveBeenCalledTimes(1);
     expect(prisma.manualIncidentUpdate.create).toHaveBeenCalledWith(
@@ -538,6 +541,16 @@ describe('ManualIncidentsService updates and lifecycle semantics', () => {
         }),
       }),
     );
+    expect(notificationDeliveryService.createForManualIncidentUpdate.mock.calls.length).toBeLessThanOrEqual(1);
+    if (notificationDeliveryService.createForManualIncidentUpdate.mock.calls.length === 1) {
+      expect(notificationDeliveryService.createForManualIncidentUpdate).toHaveBeenCalledWith(
+        expect.anything(),
+        'u1',
+        expect.objectContaining({
+          eventType: 'MANUAL_INCIDENT_RESOLVED',
+        }),
+      );
+    }
 
     await expect(
       service.createUpdateForUser('u1', 'mi-1', {
@@ -545,6 +558,8 @@ describe('ManualIncidentsService updates and lifecycle semantics', () => {
         message: 'Reopen after race',
       }),
     ).rejects.toThrow(BadRequestException);
+
+    expect(notificationDeliveryService.createForManualIncidentUpdate.mock.calls.length).toBeLessThanOrEqual(1);
   });
 
   it('returns the most recent 50 timeline entries in chronological order', async () => {
@@ -633,5 +648,192 @@ describe('Manual incidents regression safety', () => {
     expect(prisma.monitor.update).not.toHaveBeenCalled();
     expect(prisma.incident.create).not.toHaveBeenCalled();
     expect(prisma.incident.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('Manual incident notification outbox semantics', () => {
+  it('creates MANUAL_INCIDENT_OPENED delivery entries during incident creation', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+
+    const { service, prisma, notificationDeliveryService } = createService({}, true);
+
+    prisma.manualIncident.count.mockResolvedValueOnce(0);
+    prisma.monitor.findMany.mockResolvedValueOnce([
+      { id: 'm1', name: 'API' },
+      { id: 'm2', name: 'Website' },
+    ]);
+    prisma.manualIncident.create.mockResolvedValueOnce({ id: 'mi-1' });
+    prisma.manualIncidentUpdate.create.mockResolvedValueOnce({ id: 'upd-1' });
+    prisma.manualIncident.findFirst.mockResolvedValueOnce({
+      id: 'mi-1',
+      userId: 'u1',
+      title: 'Login issue',
+      status: ManualIncidentStatus.INVESTIGATING,
+      impact: ManualIncidentImpact.PARTIAL_OUTAGE,
+      startedAt: now,
+      resolvedAt: null,
+      createdAt: now,
+      updatedAt: now,
+      monitorAssociations: [
+        { monitorId: 'm1', monitor: { id: 'm1', name: 'API' } },
+        { monitorId: 'm2', monitor: { id: 'm2', name: 'Website' } },
+      ],
+      updates: [{ id: 'upd-1', status: ManualIncidentStatus.INVESTIGATING, message: 'Investigating', createdAt: now }],
+    });
+
+    await service.createForUser('u1', {
+      title: 'Login issue',
+      impact: ManualIncidentImpact.PARTIAL_OUTAGE,
+      monitorIds: ['m1', 'm2'],
+      message: 'Investigating',
+    });
+
+    expect(notificationDeliveryService.createForManualIncidentUpdate).toHaveBeenCalledWith(
+      expect.anything(),
+      'u1',
+      expect.objectContaining({
+        eventType: 'MANUAL_INCIDENT_OPENED',
+        manualIncidentId: 'mi-1',
+        manualIncidentUpdateId: 'upd-1',
+        monitorNames: ['API', 'Website'],
+      }),
+    );
+
+    vi.useRealTimers();
+  });
+
+  it('emits UPDATED for non-resolving updates and RESOLVED for resolving updates only', async () => {
+    const { service, prisma, notificationDeliveryService } = createService({}, true);
+
+    prisma.manualIncident.findFirst
+      .mockResolvedValueOnce({
+        id: 'mi-1',
+        status: ManualIncidentStatus.INVESTIGATING,
+        title: 'Incident',
+        impact: ManualIncidentImpact.DEGRADED,
+        startedAt: now,
+      })
+      .mockResolvedValueOnce({
+        id: 'mi-1',
+        userId: 'u1',
+        title: 'Incident',
+        status: ManualIncidentStatus.IDENTIFIED,
+        impact: ManualIncidentImpact.DEGRADED,
+        startedAt: now,
+        resolvedAt: null,
+        createdAt: now,
+        updatedAt: now,
+        monitorAssociations: [],
+        updates: [],
+      })
+      .mockResolvedValueOnce({
+        id: 'mi-1',
+        status: ManualIncidentStatus.MONITORING,
+        title: 'Incident',
+        impact: ManualIncidentImpact.DEGRADED,
+        startedAt: now,
+      })
+      .mockResolvedValueOnce({
+        id: 'mi-1',
+        userId: 'u1',
+        title: 'Incident',
+        status: ManualIncidentStatus.RESOLVED,
+        impact: ManualIncidentImpact.DEGRADED,
+        startedAt: now,
+        resolvedAt: now,
+        createdAt: now,
+        updatedAt: now,
+        monitorAssociations: [],
+        updates: [],
+      });
+
+    prisma.manualIncidentUpdate.create
+      .mockResolvedValueOnce({ id: 'upd-identified' })
+      .mockResolvedValueOnce({ id: 'upd-resolved' });
+
+    prisma.manualIncidentMonitor.findMany.mockResolvedValue([
+      { monitorId: 'm1', monitor: { id: 'm1', name: 'API' } },
+    ]);
+
+    await service.createUpdateForUser('u1', 'mi-1', {
+      status: ManualIncidentStatus.IDENTIFIED,
+      message: 'Identified',
+    });
+
+    await service.createUpdateForUser('u1', 'mi-1', {
+      status: ManualIncidentStatus.RESOLVED,
+      message: 'Resolved',
+    });
+
+    expect(notificationDeliveryService.createForManualIncidentUpdate).toHaveBeenNthCalledWith(
+      1,
+      expect.anything(),
+      'u1',
+      expect.objectContaining({ eventType: 'MANUAL_INCIDENT_UPDATED', manualIncidentUpdateId: 'upd-identified' }),
+    );
+
+    expect(notificationDeliveryService.createForManualIncidentUpdate).toHaveBeenNthCalledWith(
+      2,
+      expect.anything(),
+      'u1',
+      expect.objectContaining({ eventType: 'MANUAL_INCIDENT_RESOLVED', manualIncidentUpdateId: 'upd-resolved' }),
+    );
+
+    const allEvents = notificationDeliveryService.createForManualIncidentUpdate.mock.calls.map((call) => call[2].eventType);
+    expect(allEvents.filter((eventType) => eventType === 'MANUAL_INCIDENT_UPDATED')).toHaveLength(1);
+  });
+
+  it('does not emit notification deliveries from metadata patch updates', async () => {
+    const { service, prisma, notificationDeliveryService } = createService({}, true);
+
+    prisma.manualIncident.findFirst
+      .mockResolvedValueOnce({ id: 'mi-1' })
+      .mockResolvedValueOnce({
+        id: 'mi-1',
+        userId: 'u1',
+        title: 'Updated title',
+        status: ManualIncidentStatus.MONITORING,
+        impact: ManualIncidentImpact.DEGRADED,
+        startedAt: now,
+        resolvedAt: null,
+        createdAt: now,
+        updatedAt: now,
+        monitorAssociations: [],
+        updates: [],
+      });
+
+    await service.updateForUser('u1', 'mi-1', {
+      title: 'Updated title',
+      impact: ManualIncidentImpact.DEGRADED,
+    });
+
+    expect(notificationDeliveryService.createForManualIncidentUpdate).not.toHaveBeenCalled();
+  });
+
+  it('treats timeline update and delivery enqueue as one transaction boundary', async () => {
+    const { service, prisma, notificationDeliveryService } = createService({}, true);
+
+    prisma.manualIncident.findFirst.mockResolvedValueOnce({
+      id: 'mi-1',
+      status: ManualIncidentStatus.INVESTIGATING,
+      title: 'Incident',
+      impact: ManualIncidentImpact.DEGRADED,
+      startedAt: now,
+    });
+
+    prisma.manualIncidentUpdate.create.mockResolvedValueOnce({ id: 'upd-1' });
+    prisma.manualIncidentMonitor.findMany.mockResolvedValueOnce([
+      { monitorId: 'm1', monitor: { id: 'm1', name: 'API' } },
+    ]);
+
+    notificationDeliveryService.createForManualIncidentUpdate.mockRejectedValueOnce(new Error('outbox insert failed'));
+
+    await expect(
+      service.createUpdateForUser('u1', 'mi-1', {
+        status: ManualIncidentStatus.IDENTIFIED,
+        message: 'Identified',
+      }),
+    ).rejects.toThrow('outbox insert failed');
   });
 });

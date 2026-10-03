@@ -223,9 +223,15 @@ type NotificationDeliveryStatus = "all" | "pending" | "sent" | "failed";
 
 type NotificationDeliveryRecord = {
   id: string;
-  eventType: "INCIDENT_OPENED" | "INCIDENT_RESOLVED";
+  eventType:
+    | "INCIDENT_OPENED"
+    | "INCIDENT_RESOLVED"
+    | "MANUAL_INCIDENT_OPENED"
+    | "MANUAL_INCIDENT_UPDATED"
+    | "MANUAL_INCIDENT_RESOLVED";
   status: "PENDING" | "PROCESSING" | "SENT" | "FAILED";
   attemptCount: number;
+  occurredAt: string | null;
   channel: {
     id: string;
     name: string;
@@ -239,6 +245,14 @@ type NotificationDeliveryRecord = {
   sentAt: string | null;
   lastError: string | null;
   createdAt: string;
+  monitors: string[];
+  incident: {
+    type: "manual" | "automatic";
+    title: string | null;
+    impact: string | null;
+    statusSnapshot: string | null;
+    messageSnapshot: string | null;
+  };
 };
 
 type IncidentRecord = {
@@ -2108,7 +2122,9 @@ export default function Home() {
                           <div key={delivery.id} className="rounded-md border border-zinc-700 bg-zinc-950/70 p-3">
                             <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                               <div className="text-sm font-medium text-zinc-100">
-                                {delivery.monitor?.name ?? 'Monitoring event'}
+                                {delivery.incident.type === 'manual'
+                                  ? (delivery.incident.title ?? 'Manual incident event')
+                                  : (delivery.monitor?.name ?? 'Monitoring event')}
                               </div>
                               <span
                                 className={[
@@ -2124,14 +2140,30 @@ export default function Home() {
                               </span>
                             </div>
                             <div className="mt-2 flex flex-wrap gap-3 text-xs text-zinc-400">
-                              <span>Type: {delivery.eventType === 'INCIDENT_OPENED' ? 'Incident opened' : 'Incident resolved'}</span>
+                              <span>
+                                Type:{' '}
+                                {delivery.eventType === 'INCIDENT_OPENED'
+                                  ? 'Incident opened'
+                                  : delivery.eventType === 'INCIDENT_RESOLVED'
+                                    ? 'Incident resolved'
+                                    : delivery.eventType === 'MANUAL_INCIDENT_OPENED'
+                                      ? 'Manual incident opened'
+                                      : delivery.eventType === 'MANUAL_INCIDENT_UPDATED'
+                                        ? 'Manual incident update'
+                                        : 'Manual incident resolved'}
+                              </span>
                               <span>Channel: {delivery.channel?.name ?? 'Unknown channel'}</span>
                               <span>Attempts: {delivery.attemptCount}</span>
+                              {delivery.monitors.length > 0 ? <span>Services: {delivery.monitors.join(', ')}</span> : null}
                             </div>
                             <div className="mt-2 text-xs text-zinc-400">
                               Created: {new Date(delivery.createdAt).toLocaleString()}
                               {delivery.sentAt ? ` · Sent: ${new Date(delivery.sentAt).toLocaleString()}` : ''}
+                              {delivery.lastAttemptAt ? ` · Last attempt: ${new Date(delivery.lastAttemptAt).toLocaleString()}` : ''}
                             </div>
+                            {delivery.incident.messageSnapshot ? (
+                              <div className="mt-2 text-xs text-zinc-300">Message: {delivery.incident.messageSnapshot}</div>
+                            ) : null}
                             {delivery.lastError ? (
                               <div className="mt-2 text-xs text-zinc-300">Last error: {delivery.lastError}</div>
                             ) : null}

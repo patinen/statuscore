@@ -2,9 +2,9 @@
 
 StatusCore is a self-hosted monitoring platform for public services, built around GitHub authentication, monitor management, and safe HTTP checks.
 
-## Phase 9 implemented
+## Phase 10 implemented
 
-This repository includes the following Phase 5, Phase 6, Phase 7, Phase 8, and Phase 9 features:
+This repository includes the following Phase 5, Phase 6, Phase 7, Phase 8, Phase 9, and Phase 10 features:
 
 - GitHub OAuth authentication with the minimum required profile scope
 - authenticated monitor CRUD and check history
@@ -19,6 +19,9 @@ This repository includes the following Phase 5, Phase 6, Phase 7, Phase 8, and P
 - retry scheduling with infrastructure vs. business retry separation and `Retry-After` honor
 - recent notification delivery history API and dashboard visibility
 - public HTTPS-only webhook validation and Discord webhook host restrictions
+- manual incident notification event support using the same outbox + BullMQ worker pipeline
+- distinct notification event types for automatic and manual incidents
+- immutable delivery payload snapshots for resilient history and replay safety
 
 This repository now also includes Phase 6 public status pages:
 
@@ -70,6 +73,18 @@ This repository now also includes Phase 9 manual incidents and update timelines:
 	- recent resolved manual incidents with updates
 	- page-scoped affected service names only
 - public page overall status priority now includes `DEGRADED` for manual incident communication
+
+This repository now also includes Phase 10 manual incident notification delivery:
+
+- manual timeline update events create transactional outbox rows:
+	- `MANUAL_INCIDENT_OPENED`
+	- `MANUAL_INCIDENT_UPDATED`
+	- `MANUAL_INCIDENT_RESOLVED`
+- manual events reuse the existing delivery scheduler and worker queue
+- generic webhook and Discord deliveries support manual incident payloads
+- one channel delivery per manual incident timeline entry, even when one channel is linked to multiple affected monitors
+- metadata edits (`PATCH /manual-incidents/:id`) do not emit notifications
+- delivery history remains readable from immutable snapshots even if the manual incident or channel is later deleted
 
 Uptime percentage is calculated from recorded monitoring checks and is not an SLA guarantee.
 
@@ -251,6 +266,18 @@ The notification flow follows an outbox model:
 - endpoint URLs are encrypted at rest and validated against public HTTPS-only targets
 - DNS/IP pinning and blocked-address protections remain enforced for all outbound notification requests
 
+Manual incident notifications use the same outbox model but remain separate from automatic monitor incident transitions:
+
+- automatic events:
+	- `INCIDENT_OPENED` -> webhook `incident.opened`
+	- `INCIDENT_RESOLVED` -> webhook `incident.resolved`
+- manual events:
+	- `MANUAL_INCIDENT_OPENED` -> webhook `manual_incident.opened`
+	- `MANUAL_INCIDENT_UPDATED` -> webhook `manual_incident.updated`
+	- `MANUAL_INCIDENT_RESOLVED` -> webhook `manual_incident.resolved`
+
+Manual incident notification delivery does not alter monitoring analytics.
+
 The public status page flow is:
 
 - monitor checks update monitor state and open or resolve incidents
@@ -289,6 +316,5 @@ Analytics currently query raw `CheckResult` and `Incident` records with bounded 
 - retention/rollups for long-term analytics efficiency
 - public historical uptime views
 - recurring maintenance schedules
-- manual incident notification delivery integration
 - custom domains
 - multi-region monitoring

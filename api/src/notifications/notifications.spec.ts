@@ -1,4 +1,5 @@
 import { BadRequestException, ValidationPipe } from '@nestjs/common';
+import { ManualIncidentImpact, ManualIncidentStatus } from '@prisma/client';
 import { validate } from 'class-validator';
 import { describe, expect, it, vi } from 'vitest';
 import { NotificationDeliveryService } from './notification-delivery.service.js';
@@ -109,6 +110,62 @@ describe('NotificationsService', () => {
     const highLimit = Object.assign(new NotificationDeliveryQueryDto(), { status: 'all', limit: 101 });
     const highErrors = await validate(highLimit);
     expect(highErrors.some((error) => error.property === 'limit')).toBe(true);
+  });
+
+  it('returns manual incident delivery history from snapshots even when source incident rows are missing', async () => {
+    const prisma = {
+      notificationDelivery: {
+        findMany: vi.fn(async () => [
+          {
+            id: 'delivery-1',
+            eventType: 'MANUAL_INCIDENT_RESOLVED',
+            status: 'SENT',
+            attemptCount: 2,
+            occurredAt: new Date('2026-10-04T00:20:00Z'),
+            sentAt: new Date('2026-10-04T00:20:10Z'),
+            lastAttemptAt: new Date('2026-10-04T00:20:10Z'),
+            lastError: null,
+            createdAt: new Date('2026-10-04T00:20:00Z'),
+            channelId: null,
+            channelName: 'Deleted channel snapshot',
+            channelType: 'WEBHOOK',
+            monitorNamesSnapshot: ['API', 'Website'],
+            incidentTitleSnapshot: 'Login outage',
+            incidentImpactSnapshot: 'PARTIAL_OUTAGE',
+            incidentStatusSnapshot: 'RESOLVED',
+            updateMessageSnapshot: 'Fully resolved.',
+            incident: null,
+          },
+        ]),
+      },
+    } as any;
+
+    const service = new NotificationsService(prisma, {
+      encryptEndpoint: (value: string) => value,
+      decryptEndpoint: (value: string) => value,
+    } as never);
+
+    const rows = await service.listDeliveriesForUser('user-1', 'all', 10);
+    expect(rows).toEqual([
+      expect.objectContaining({
+        id: 'delivery-1',
+        eventType: 'MANUAL_INCIDENT_RESOLVED',
+        channel: {
+          id: null,
+          name: 'Deleted channel snapshot',
+          type: 'WEBHOOK',
+        },
+        monitor: null,
+        monitors: ['API', 'Website'],
+        incident: {
+          type: 'manual',
+          title: 'Login outage',
+          impact: 'PARTIAL_OUTAGE',
+          statusSnapshot: 'RESOLVED',
+          messageSnapshot: 'Fully resolved.',
+        },
+      }),
+    ]);
   });
 
   it('creates notification delivery rows with channel metadata for enabled incident channels', async () => {
@@ -355,5 +412,306 @@ describe('NotificationSecretService', () => {
 
     const encrypted = service.encryptEndpoint('https://hooks.example.com/webhook');
     expect(() => wrongKeyService.decryptEndpoint(encrypted)).toThrow();
+  });
+});
+
+describe('NotificationDeliveryService manual incident outbox', () => {
+  const createDeliveryService = () => {
+    const service = new NotificationDeliveryService(
+      {} as any,
+      { decryptEndpoint: (value: string) => value } as any,
+      { lookup: vi.fn() } as any,
+      { isBlockedAddress: vi.fn(() => false), normalizeAddress: vi.fn((value) => value) } as any,
+    );
+    return service;
+  };
+
+  it('creates one delivery per channel even when the channel is linked to multiple affected monitors', async () => {
+    const service = createDeliveryService();
+    const tx = {
+      notificationChannel: {
+        findMany: vi.fn(async () => [
+          { id: 'channel-1', userId: 'user-1', name: 'Discord Ops', type: 'DISCORD' },
+        ]),
+      },
+      notificationDelivery: {
+        createMany: vi.fn(async () => ({ count: 1 })),
+      },
+    } as any;
+
+    await service.createForManualIncidentUpdate(tx, 'user-1', {
+      manualIncidentId: 'mi-1',
+      manualIncidentUpdateId: 'upd-1',
+      eventType: 'MANUAL_INCIDENT_OPENED',
+      title: 'Login outage',
+      impact: ManualIncidentImpact.PARTIAL_OUTAGE,
+      incidentStatus: ManualIncidentStatus.INVESTIGATING,
+      updateStatus: ManualIncidentStatus.INVESTIGATING,
+      updateMessage: 'Investigating',
+      startedAt: new Date('2026-10-04T00:00:00Z'),
+      resolvedAt: null,
+      eventTimestamp: new Date('2026-10-04T00:00:00Z'),
+      monitorIds: ['m1', 'm2'],
+      monitorNames: ['API', 'Website'],
+    });
+
+    expect(tx.notificationChannel.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          userId: 'user-1',
+          enabled: true,
+        }),
+      }),
+    );
+    expect(tx.notificationDelivery.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: [
+          expect.objectContaining({
+            manualIncidentId: 'mi-1',
+            manualIncidentUpdateId: 'upd-1',
+            eventType: 'MANUAL_INCIDENT_OPENED',
+            monitorNamesSnapshot: ['API', 'Website'],
+          }),
+        ],
+        skipDuplicates: true,
+      }),
+    );
+  });
+
+  it('ignores disabled channels, foreign ownership channels, and still succeeds with no eligible channels', async () => {
+    const service = createDeliveryService();
+
+    const noChannelsTx = {
+      notificationChannel: { findMany: vi.fn(async () => []) },
+      notificationDelivery: { createMany: vi.fn(async () => ({ count: 0 })) },
+    } as any;
+
+    await expect(
+      service.createForManualIncidentUpdate(noChannelsTx, 'user-1', {
+        manualIncidentId: 'mi-1',
+        manualIncidentUpdateId: 'upd-1',
+        eventType: 'MANUAL_INCIDENT_UPDATED',
+        title: 'Login outage',
+        impact: ManualIncidentImpact.DEGRADED,
+        incidentStatus: ManualIncidentStatus.IDENTIFIED,
+        updateStatus: ManualIncidentStatus.IDENTIFIED,
+        updateMessage: 'Identified',
+        startedAt: new Date('2026-10-04T00:00:00Z'),
+        resolvedAt: null,
+        eventTimestamp: new Date('2026-10-04T00:10:00Z'),
+        monitorIds: ['m1'],
+        monitorNames: ['API'],
+      }),
+    ).resolves.toBeUndefined();
+    expect(noChannelsTx.notificationDelivery.createMany).not.toHaveBeenCalled();
+
+    const foreignChannelTx = {
+      notificationChannel: {
+        findMany: vi.fn(async () => [{ id: 'channel-x', userId: 'user-2', name: 'Foreign', type: 'WEBHOOK' }]),
+      },
+      notificationDelivery: { createMany: vi.fn(async () => ({ count: 0 })) },
+    } as any;
+
+    await service.createForManualIncidentUpdate(foreignChannelTx, 'user-1', {
+      manualIncidentId: 'mi-1',
+      manualIncidentUpdateId: 'upd-2',
+      eventType: 'MANUAL_INCIDENT_UPDATED',
+      title: 'Login outage',
+      impact: ManualIncidentImpact.DEGRADED,
+      incidentStatus: ManualIncidentStatus.MONITORING,
+      updateStatus: ManualIncidentStatus.MONITORING,
+      updateMessage: 'Monitoring',
+      startedAt: new Date('2026-10-04T00:00:00Z'),
+      resolvedAt: null,
+      eventTimestamp: new Date('2026-10-04T00:15:00Z'),
+      monitorIds: ['m1'],
+      monitorNames: ['API'],
+    });
+
+    expect(foreignChannelTx.notificationDelivery.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: [] }),
+    );
+  });
+
+  it('uses manualIncidentUpdateId with skipDuplicates to support idempotent retries', async () => {
+    const service = createDeliveryService();
+    const tx = {
+      notificationChannel: {
+        findMany: vi.fn(async () => [{ id: 'channel-1', userId: 'user-1', name: 'Ops', type: 'WEBHOOK' }]),
+      },
+      notificationDelivery: {
+        createMany: vi.fn(async () => ({ count: 1 })),
+      },
+    } as any;
+
+    const input = {
+      manualIncidentId: 'mi-1',
+      manualIncidentUpdateId: 'upd-immutable-1',
+      eventType: 'MANUAL_INCIDENT_UPDATED' as const,
+      title: 'Login outage',
+      impact: ManualIncidentImpact.DEGRADED,
+      incidentStatus: ManualIncidentStatus.MONITORING,
+      updateStatus: ManualIncidentStatus.MONITORING,
+      updateMessage: 'Monitoring recovery',
+      startedAt: new Date('2026-10-04T00:00:00Z'),
+      resolvedAt: null,
+      eventTimestamp: new Date('2026-10-04T00:30:00Z'),
+      monitorIds: ['m1'],
+      monitorNames: ['API'],
+    };
+
+    await service.createForManualIncidentUpdate(tx, 'user-1', input);
+    await service.createForManualIncidentUpdate(tx, 'user-1', input);
+
+    expect(tx.notificationDelivery.createMany).toHaveBeenCalledTimes(2);
+    expect(tx.notificationDelivery.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skipDuplicates: true,
+        data: [
+          expect.objectContaining({
+            manualIncidentUpdateId: 'upd-immutable-1',
+            eventType: 'MANUAL_INCIDENT_UPDATED',
+          }),
+        ],
+      }),
+    );
+  });
+
+  it('builds manual generic payload with stable deliveryId, safe fields, and no monitor URL or userId leakage', async () => {
+    const service = createDeliveryService();
+
+    const payload = (service as any).buildPayload({
+      id: 'delivery-1',
+      userId: 'user-1',
+      eventType: 'MANUAL_INCIDENT_UPDATED',
+      status: 'PENDING',
+      attemptCount: 0,
+      nextAttemptAt: null,
+      createdAt: new Date('2026-10-04T00:00:00Z'),
+      occurredAt: new Date('2026-10-04T00:10:00Z'),
+      incidentTitleSnapshot: 'Login outage',
+      incidentImpactSnapshot: ManualIncidentImpact.PARTIAL_OUTAGE,
+      incidentStatusSnapshot: ManualIncidentStatus.IDENTIFIED,
+      updateMessageSnapshot: 'Investigating elevated authentication errors.',
+      monitorNamesSnapshot: ['API', 'Website'],
+      payloadSnapshot: {
+        event: 'manual_incident.updated',
+        incident: {
+          type: 'manual',
+          title: 'Login outage',
+          impact: 'PARTIAL_OUTAGE',
+          status: 'IDENTIFIED',
+          startedAt: '2026-10-04T00:00:00.000Z',
+          resolvedAt: null,
+        },
+        update: {
+          status: 'IDENTIFIED',
+          message: 'Investigating elevated authentication errors.',
+          createdAt: '2026-10-04T00:10:00.000Z',
+        },
+        monitors: [{ name: 'API' }, { name: 'Website' }],
+      },
+      channel: { id: 'ch-1', userId: 'user-1', name: 'Ops', type: 'WEBHOOK', endpointEncrypted: 'x', enabled: true, createdAt: new Date(), updatedAt: new Date() },
+      incident: null,
+    });
+
+    expect(payload.deliveryId).toBe('delivery-1');
+    expect(payload.event).toBe('manual_incident.updated');
+    expect(payload).not.toHaveProperty('userId');
+    expect((payload as any).monitor?.url).toBeUndefined();
+    expect((payload as any).incident.type).toBe('manual');
+  });
+
+  it('builds Discord manual incident payloads with safe mention behavior and bounded user text', async () => {
+    const service = createDeliveryService();
+    const longMessage = 'x'.repeat(5000);
+    const payload = {
+      event: 'manual_incident.resolved',
+      incident: {
+        type: 'manual',
+        title: 'Login incident',
+        impact: 'PARTIAL_OUTAGE',
+        status: 'RESOLVED',
+        startedAt: '2026-10-04T00:00:00.000Z',
+        resolvedAt: '2026-10-04T00:20:00.000Z',
+      },
+      update: {
+        status: 'RESOLVED',
+        message: longMessage,
+        createdAt: '2026-10-04T00:20:00.000Z',
+      },
+      monitors: [{ name: 'API' }, { name: 'Website' }],
+    };
+
+    const opened = (service as any).buildDiscordPayload('MANUAL_INCIDENT_OPENED', payload, 'delivery-opened');
+    const updated = (service as any).buildDiscordPayload('MANUAL_INCIDENT_UPDATED', payload, 'delivery-updated');
+    const resolved = (service as any).buildDiscordPayload('MANUAL_INCIDENT_RESOLVED', payload, 'delivery-resolved');
+
+    expect(opened.embeds[0].title).toContain('Incident opened:');
+    expect(updated.embeds[0].title).toContain('Incident update:');
+    expect(resolved.embeds[0].title).toContain('Incident resolved:');
+    expect(resolved.allowed_mentions.parse).toEqual([]);
+
+    const messageField = resolved.embeds[0].fields.find((field: { name: string }) => field.name === 'Resolution');
+    expect(String(messageField?.value).length).toBeLessThanOrEqual(1024);
+  });
+
+  it('keeps automatic event payload compatibility and event names', async () => {
+    const service = createDeliveryService();
+    const automaticOpened = (service as any).buildPayload({
+      id: 'delivery-auto-opened',
+      userId: 'user-1',
+      eventType: 'INCIDENT_OPENED',
+      status: 'PENDING',
+      attemptCount: 0,
+      nextAttemptAt: null,
+      createdAt: new Date('2026-10-04T00:00:00Z'),
+      occurredAt: new Date('2026-10-04T00:00:00Z'),
+      incidentTitleSnapshot: null,
+      incidentImpactSnapshot: null,
+      incidentStatusSnapshot: null,
+      updateMessageSnapshot: null,
+      monitorNamesSnapshot: null,
+      payloadSnapshot: null,
+      channel: null,
+      incident: {
+        id: 'inc-1',
+        monitorId: 'm1',
+        startedAt: new Date('2026-10-04T00:00:00Z'),
+        resolvedAt: null,
+        reason: 'Gateway timeout',
+        lastError: 'ETIMEDOUT',
+        monitor: {
+          id: 'm1',
+          name: 'API',
+          url: 'https://api.example.com',
+          userId: 'user-1',
+          method: 'GET',
+          expectedStatusCode: 200,
+          intervalSeconds: 60,
+          timeoutMs: 10000,
+          failureThreshold: 3,
+          enabled: true,
+          currentStatus: 'DOWN',
+          consecutiveFailures: 3,
+          lastCheckedAt: null,
+          nextCheckAt: null,
+          createdAt: new Date('2026-10-04T00:00:00Z'),
+          updatedAt: new Date('2026-10-04T00:00:00Z'),
+          user: {
+            id: 'user-1',
+            githubId: 'gh-1',
+            login: 'ops',
+            name: null,
+            avatarUrl: null,
+            createdAt: new Date('2026-10-04T00:00:00Z'),
+            updatedAt: new Date('2026-10-04T00:00:00Z'),
+          },
+        },
+      },
+    });
+
+    expect(automaticOpened.event).toBe('incident.opened');
+    expect(automaticOpened.monitor.url).toBe('https://api.example.com');
   });
 });
