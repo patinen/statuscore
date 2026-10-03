@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { validate } from 'class-validator';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
@@ -72,6 +73,120 @@ describe('StatusPage DTOs', () => {
 });
 
 describe('StatusPagesService ownership and CRUD', () => {
+  it('stores create without description as null', async () => {
+    const { service, prisma } = createService();
+
+    prisma.statusPage.count.mockResolvedValueOnce(0);
+    prisma.statusPage.findUnique.mockResolvedValueOnce(null);
+    prisma.monitor.findMany.mockResolvedValueOnce([{ id: 'monitor-1', name: 'API' }]);
+    prisma.statusPage.create.mockResolvedValueOnce({ id: 'page-1' });
+    prisma.statusPage.findFirst.mockResolvedValueOnce({
+      id: 'page-1',
+      userId: 'user-1',
+      name: 'My Services',
+      slug: 'my-services',
+      description: null,
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+      monitorAssociations: [
+        { monitorId: 'monitor-1', displayName: 'API', position: 0, createdAt: now, monitor: { id: 'monitor-1', name: 'API' } },
+      ],
+    });
+
+    await expect(
+      service.createForUser('user-1', {
+        name: 'My Services',
+        slug: 'my-services',
+        monitorIds: ['monitor-1'],
+      }),
+    ).resolves.toMatchObject({ description: null });
+
+    expect(prisma.statusPage.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ description: null }),
+      }),
+    );
+  });
+
+  it('preserves description when update omits description', async () => {
+    const { service, prisma } = createService();
+
+    prisma.statusPage.findFirst
+      .mockResolvedValueOnce({ id: 'page-1', slug: 'my-services' })
+      .mockResolvedValueOnce({
+        id: 'page-1',
+        userId: 'user-1',
+        name: 'My Services',
+        slug: 'my-services',
+        description: 'Existing description',
+        enabled: false,
+        createdAt: now,
+        updatedAt: now,
+        monitorAssociations: [],
+      });
+
+    await expect(service.updateForUser('user-1', 'page-1', { enabled: false })).resolves.toMatchObject({
+      description: 'Existing description',
+    });
+
+    expect(prisma.statusPage.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.not.objectContaining({ description: expect.anything() }),
+      }),
+    );
+  });
+
+  it('updates description when provided and clears description to null when blank', async () => {
+    const { service, prisma } = createService();
+
+    prisma.statusPage.findFirst
+      .mockResolvedValueOnce({ id: 'page-1', slug: 'my-services' })
+      .mockResolvedValueOnce({
+        id: 'page-1',
+        userId: 'user-1',
+        name: 'My Services',
+        slug: 'my-services',
+        description: 'Updated description',
+        enabled: true,
+        createdAt: now,
+        updatedAt: now,
+        monitorAssociations: [],
+      })
+      .mockResolvedValueOnce({ id: 'page-1', slug: 'my-services' })
+      .mockResolvedValueOnce({
+        id: 'page-1',
+        userId: 'user-1',
+        name: 'My Services',
+        slug: 'my-services',
+        description: null,
+        enabled: true,
+        createdAt: now,
+        updatedAt: now,
+        monitorAssociations: [],
+      });
+
+    await expect(service.updateForUser('user-1', 'page-1', { description: 'Updated description' })).resolves.toMatchObject({
+      description: 'Updated description',
+    });
+    expect(prisma.statusPage.update).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        data: expect.objectContaining({ description: 'Updated description' }),
+      }),
+    );
+
+    await expect(service.updateForUser('user-1', 'page-1', { description: '' })).resolves.toMatchObject({
+      description: null,
+    });
+    expect(prisma.statusPage.update).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        data: expect.objectContaining({ description: null }),
+      }),
+    );
+  });
+
   it('creates status pages with valid slugs, rejects duplicates, enforces page and monitor limits, and rejects foreign monitors', async () => {
     const { service, prisma } = createService();
 
@@ -229,6 +344,39 @@ describe('StatusPagesService ownership and CRUD', () => {
 
     expect(migration).toContain('ALTER TABLE "StatusPageMonitor" ADD CONSTRAINT "StatusPageMonitor_monitorId_fkey" FOREIGN KEY ("monitorId") REFERENCES "Monitor"("id") ON DELETE CASCADE');
     expect(migration).toContain('ALTER TABLE "StatusPageMonitor" ADD CONSTRAINT "StatusPageMonitor_statusPageId_fkey" FOREIGN KEY ("statusPageId") REFERENCES "StatusPage"("id") ON DELETE CASCADE');
+  });
+
+  it('maps create/update slug unique race P2002 to ConflictException', async () => {
+    const createCase = createService();
+    const slugConflict = new Prisma.PrismaClientKnownRequestError('slug conflict', {
+      code: 'P2002',
+      clientVersion: '6.19.3',
+      meta: { target: ['slug'] },
+    });
+
+    createCase.prisma.statusPage.count.mockResolvedValueOnce(0);
+    createCase.prisma.statusPage.findUnique.mockResolvedValueOnce(null);
+    createCase.prisma.monitor.findMany.mockResolvedValueOnce([]);
+    createCase.prisma.$transaction.mockRejectedValueOnce(slugConflict);
+
+    await expect(
+      createCase.service.createForUser('user-1', {
+        name: 'Race',
+        slug: 'race-slug',
+        monitorIds: [],
+      }),
+    ).rejects.toThrow(ConflictException);
+
+    const updateCase = createService();
+    updateCase.prisma.statusPage.findFirst.mockResolvedValueOnce({ id: 'page-1', slug: 'old-slug' });
+    updateCase.prisma.statusPage.findUnique.mockResolvedValueOnce(null);
+    updateCase.prisma.$transaction.mockRejectedValueOnce(slugConflict);
+
+    await expect(
+      updateCase.service.updateForUser('user-1', 'page-1', {
+        slug: 'new-slug',
+      }),
+    ).rejects.toThrow(ConflictException);
   });
 });
 

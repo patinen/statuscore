@@ -1,4 +1,5 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service.js';
 import type { CreateStatusPageDto, UpdateStatusPageDto } from './status-pages.dto.js';
 
@@ -55,8 +56,29 @@ type PublicPageStatus = 'OPERATIONAL' | 'DEGRADED' | 'OUTAGE' | 'UNKNOWN';
 export class StatusPagesService {
   constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
 
-  private static normalizePageDescription(description: string | undefined): string | null {
+  private static normalizePageDescription(description: string | null | undefined): string | null {
+    if (description === null) {
+      return null;
+    }
+
     return description?.trim() ? description.trim() : null;
+  }
+
+  private static isSlugUniqueConflict(error: unknown): boolean {
+    if (!(error instanceof Prisma.PrismaClientKnownRequestError)) {
+      return false;
+    }
+
+    if (error.code !== 'P2002') {
+      return false;
+    }
+
+    const target = error.meta?.target;
+    if (Array.isArray(target)) {
+      return target.includes('slug');
+    }
+
+    return typeof target === 'string' && target.includes('slug');
   }
 
   private static monitorStatusForPublic(monitor: { enabled: boolean; currentStatus: string }): PublicMonitorStatus {
@@ -210,31 +232,41 @@ export class StatusPagesService {
     await this.ensureSlugIsAvailable(data.slug);
     const validatedMonitors = await this.validateMonitorOwnership(userId, data.monitorIds);
 
-    const createdPage = await this.prisma.$transaction(async (tx) => {
-      const page = await tx.statusPage.create({
-        data: {
-          userId,
-          name: data.name.trim(),
-          slug: data.slug,
-          description: StatusPagesService.normalizePageDescription(data.description),
-          enabled: true,
-        },
-      });
+    let createdPage: { id: string };
 
-      if (data.monitorIds.length > 0) {
-        await tx.statusPageMonitor.createMany({
-          data: data.monitorIds.map((monitorId, index) => ({
-            statusPageId: page.id,
-            monitorId,
-            displayName: validatedMonitors.find((monitor) => monitor.id === monitorId)?.name ?? null,
-            position: index,
-          })),
-          skipDuplicates: true,
+    try {
+      createdPage = await this.prisma.$transaction(async (tx) => {
+        const page = await tx.statusPage.create({
+          data: {
+            userId,
+            name: data.name.trim(),
+            slug: data.slug,
+            description: StatusPagesService.normalizePageDescription(data.description),
+            enabled: true,
+          },
         });
+
+        if (data.monitorIds.length > 0) {
+          await tx.statusPageMonitor.createMany({
+            data: data.monitorIds.map((monitorId, index) => ({
+              statusPageId: page.id,
+              monitorId,
+              displayName: validatedMonitors.find((monitor) => monitor.id === monitorId)?.name ?? null,
+              position: index,
+            })),
+            skipDuplicates: true,
+          });
+        }
+
+        return page;
+      });
+    } catch (error) {
+      if (StatusPagesService.isSlugUniqueConflict(error)) {
+        throw new ConflictException('Status page slug is already in use.');
       }
 
-      return page;
-    });
+      throw error;
+    }
 
     return this.loadOwnedStatusPage(userId, createdPage.id);
   }
@@ -256,33 +288,43 @@ export class StatusPagesService {
     const monitorIds = data.monitorIds ?? [];
     const validatedMonitors = data.monitorIds ? await this.validateMonitorOwnership(userId, data.monitorIds) : null;
 
-    await this.prisma.$transaction(async (tx) => {
-      await tx.statusPage.update({
-        where: { id: statusPageId },
-        data: {
-          ...(data.name !== undefined ? { name: data.name.trim() } : {}),
-          ...(data.slug !== undefined ? { slug: data.slug } : {}),
-          ...(data.description !== undefined ? { description: StatusPagesService.normalizePageDescription(data.description) } : {}),
-          ...(data.enabled !== undefined ? { enabled: data.enabled } : {}),
-        },
-      });
+    try {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.statusPage.update({
+          where: { id: statusPageId },
+          data: {
+            ...(data.name !== undefined ? { name: data.name.trim() } : {}),
+            ...(data.slug !== undefined ? { slug: data.slug } : {}),
+            ...(Object.prototype.hasOwnProperty.call(data, 'description')
+              ? { description: StatusPagesService.normalizePageDescription(data.description) }
+              : {}),
+            ...(data.enabled !== undefined ? { enabled: data.enabled } : {}),
+          },
+        });
 
-      if (validatedMonitors) {
-        await tx.statusPageMonitor.deleteMany({ where: { statusPageId } });
+        if (validatedMonitors) {
+          await tx.statusPageMonitor.deleteMany({ where: { statusPageId } });
 
-        if (monitorIds.length > 0) {
-          await tx.statusPageMonitor.createMany({
-            data: monitorIds.map((monitorId, index) => ({
-              statusPageId,
-              monitorId,
-              displayName: validatedMonitors.find((monitor) => monitor.id === monitorId)?.name ?? null,
-              position: index,
-            })),
-            skipDuplicates: true,
-          });
+          if (monitorIds.length > 0) {
+            await tx.statusPageMonitor.createMany({
+              data: monitorIds.map((monitorId, index) => ({
+                statusPageId,
+                monitorId,
+                displayName: validatedMonitors.find((monitor) => monitor.id === monitorId)?.name ?? null,
+                position: index,
+              })),
+              skipDuplicates: true,
+            });
+          }
         }
+      });
+    } catch (error) {
+      if (StatusPagesService.isSlugUniqueConflict(error)) {
+        throw new ConflictException('Status page slug is already in use.');
       }
-    });
+
+      throw error;
+    }
 
     return this.loadOwnedStatusPage(userId, statusPageId);
   }

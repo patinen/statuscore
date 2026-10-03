@@ -231,6 +231,7 @@ export default function Home() {
   const [editingChannelId, setEditingChannelId] = useState<string | null>(null);
   const [statusPageForm, setStatusPageForm] = useState<StatusPageForm>(defaultStatusPageForm);
   const [editingStatusPageId, setEditingStatusPageId] = useState<string | null>(null);
+  const [editingStatusPageDescription, setEditingStatusPageDescription] = useState<string | null>(null);
   const [isLoadingChecks, setIsLoadingChecks] = useState<Record<string, boolean>>({});
   const [expandedMonitorId, setExpandedMonitorId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -340,6 +341,7 @@ export default function Home() {
   const resetStatusPageForm = () => {
     setStatusPageForm(defaultStatusPageForm);
     setEditingStatusPageId(null);
+    setEditingStatusPageDescription(null);
   };
 
   const updateForm = <K extends keyof MonitorForm>(key: K, value: MonitorForm[K]) => {
@@ -410,6 +412,7 @@ export default function Home() {
 
   const beginEditStatusPage = (statusPage: StatusPage) => {
     setEditingStatusPageId(statusPage.id);
+    setEditingStatusPageDescription(statusPage.description);
     setStatusPageForm({
       name: statusPage.name,
       slug: statusPage.slug,
@@ -499,15 +502,17 @@ export default function Home() {
         ? {
             name,
             slug,
-            description: description || undefined,
             enabled: statusPageForm.enabled,
             monitorIds: statusPageForm.monitorIds,
+            ...(description !== (editingStatusPageDescription ?? '')
+              ? { description: description.length > 0 ? description : null }
+              : {}),
           }
         : {
             name,
             slug,
-            description: description || undefined,
             monitorIds: statusPageForm.monitorIds,
+            ...(description.length > 0 ? { description } : {}),
           };
 
       if (editingStatusPageId) {

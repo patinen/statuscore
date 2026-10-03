@@ -145,6 +145,20 @@ export default function PublicStatusPage({ params }: { params: Promise<{ slug: s
     };
   }, [slug]);
 
+  if (isLoading && !page) {
+    return (
+      <main className="min-h-screen bg-[#0b0d10] px-4 py-10 text-zinc-100 sm:px-6 lg:px-8">
+        <div className="mx-auto flex min-h-[70vh] max-w-4xl items-center justify-center">
+          <div className="w-full rounded-2xl border border-zinc-800 bg-[#101317] p-8 text-center shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+            <div className="text-xs font-medium uppercase tracking-[0.35em] text-zinc-500">StatusCore</div>
+            <h1 className="mt-4 text-3xl font-semibold tracking-tight text-white">Loading status page…</h1>
+            <p className="mt-3 text-sm leading-6 text-zinc-400">Fetching current service and incident status.</p>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
   if (isNotFound) {
     return (
       <main className="min-h-screen bg-[#0b0d10] px-4 py-10 text-zinc-100 sm:px-6 lg:px-8">
@@ -208,22 +222,28 @@ export default function PublicStatusPage({ params }: { params: Promise<{ slug: s
         </header>
 
         <section className="grid gap-4 md:grid-cols-2">
-          {page?.monitors.map((monitor) => (
-            <article key={`${monitor.name}-${monitor.lastCheckedAt ?? 'never'}`} className="rounded-2xl border border-zinc-800 bg-[#101317] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h2 className="text-lg font-medium text-white">{monitor.name}</h2>
-                  <p className="mt-1 text-sm text-zinc-400">Last checked {formatDateTime(monitor.lastCheckedAt)}</p>
+          {page?.monitors.length ? (
+            page.monitors.map((monitor) => (
+              <article key={`${monitor.name}-${monitor.lastCheckedAt ?? 'never'}`} className="rounded-2xl border border-zinc-800 bg-[#101317] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-medium text-white">{monitor.name}</h2>
+                    <p className="mt-1 text-sm text-zinc-400">Last checked {formatDateTime(monitor.lastCheckedAt)}</p>
+                  </div>
+                  <span className={[
+                    "rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.2em]",
+                    monitorCopy[monitor.status].className,
+                  ].join(" ")}>
+                    {monitorCopy[monitor.status].label}
+                  </span>
                 </div>
-                <span className={[
-                  "rounded-full border px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.2em]",
-                  monitorCopy[monitor.status].className,
-                ].join(" ")}>
-                  {monitorCopy[monitor.status].label}
-                </span>
-              </div>
+              </article>
+            ))
+          ) : (
+            <article className="md:col-span-2 rounded-2xl border border-zinc-800 bg-[#101317] p-5 text-sm text-zinc-400 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+              No services have been added to this status page.
             </article>
-          ))}
+          )}
         </section>
 
         <section className="mt-8 grid gap-4 lg:grid-cols-2">
