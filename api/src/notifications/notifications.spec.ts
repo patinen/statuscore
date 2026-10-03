@@ -1,5 +1,8 @@
 import { BadRequestException } from '@nestjs/common';
+import { validate } from 'class-validator';
 import { describe, expect, it, vi } from 'vitest';
+import { NotificationDeliveryService } from './notification-delivery.service.js';
+import { NotificationDeliveryQueryDto } from './notifications.dto.js';
 import { NotificationsService } from './notifications.service.js';
 import { NotificationSecretService } from './notification-secret.service.js';
 
@@ -22,6 +25,70 @@ describe('NotificationsService', () => {
       expect.objectContaining({
         where: { userId: 'user-1' },
         take: 50,
+      }),
+    );
+  });
+
+  it('accepts valid delivery statuses and rejects invalid DTO values', async () => {
+    const validStatuses = ['all', 'pending', 'sent', 'failed'] as const;
+    for (const status of validStatuses) {
+      const dto = Object.assign(new NotificationDeliveryQueryDto(), { status, limit: 10 });
+      await expect(validate(dto)).resolves.toHaveLength(0);
+    }
+
+    const invalid = Object.assign(new NotificationDeliveryQueryDto(), { status: 'garbage', limit: 10 });
+    const errors = await validate(invalid);
+    expect(errors.some((error) => error.property === 'status')).toBe(true);
+
+    const zeroLimit = Object.assign(new NotificationDeliveryQueryDto(), { status: 'all', limit: 0 });
+    const zeroErrors = await validate(zeroLimit);
+    expect(zeroErrors.some((error) => error.property === 'limit')).toBe(true);
+
+    const highLimit = Object.assign(new NotificationDeliveryQueryDto(), { status: 'all', limit: 101 });
+    const highErrors = await validate(highLimit);
+    expect(highErrors.some((error) => error.property === 'limit')).toBe(true);
+  });
+
+  it('creates notification delivery rows with channel metadata for enabled incident channels', async () => {
+    const tx = {
+      incident: {
+        findUnique: vi.fn(async () => ({
+          id: 'incident-1',
+          monitor: { userId: 'user-1' },
+        })),
+      },
+      notificationChannel: {
+        findMany: vi.fn(async () => [
+          { id: 'channel-1', userId: 'user-1', name: 'Ops Hook', type: 'WEBHOOK' },
+          { id: 'channel-2', userId: 'user-1', name: 'Discord', type: 'DISCORD' },
+        ]),
+      },
+      notificationDelivery: {
+        createMany: vi.fn(async () => ({ count: 2 })),
+      },
+    } as any;
+
+    const service = new NotificationDeliveryService(
+      {} as any,
+      { decryptEndpoint: (value: string) => value } as any,
+      { lookup: vi.fn() } as any,
+      { isBlockedAddress: vi.fn(() => false), normalizeAddress: vi.fn((value) => value) } as any,
+    );
+
+    await service.createForIncidentTransition(tx, 'incident-1', 'INCIDENT_OPENED', ['channel-1', 'channel-2'], new Date('2026-01-01T00:00:00Z'));
+
+    expect(tx.notificationDelivery.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.arrayContaining([
+          expect.objectContaining({
+            userId: 'user-1',
+            channelId: 'channel-1',
+            channelName: 'Ops Hook',
+            channelType: 'WEBHOOK',
+            incidentId: 'incident-1',
+            status: 'PENDING',
+          }),
+        ]),
       }),
     );
   });

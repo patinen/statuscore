@@ -10,10 +10,10 @@ This repository includes the following Phase 5 features:
 - authenticated monitor CRUD and check history
 - SSRF-safe public target validation for monitoring and notifications
 - Redis/BullMQ job queueing for both monitor execution and notification delivery
-- separate monitoring and notification worker processes
+- separate monitor and notification queue consumers in the worker process
 - secure HTTP/HTTPS checks with DNS/IP pinning and no redirect following
 - incident lifecycle management with a single open incident per monitor
-- notification channel configuration with per-user ownership and monitor associations
+- notification channel configuration UI with per-user ownership and monitor associations
 - notification delivery outbox semantics with `NotificationDelivery` rows created during incident transitions
 - encrypted endpoint storage via AES-256-GCM and secure secret handling
 - retry scheduling with infrastructure vs. business retry separation and `Retry-After` honor

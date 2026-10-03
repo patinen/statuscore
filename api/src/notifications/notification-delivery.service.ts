@@ -329,11 +329,13 @@ export class NotificationDeliveryService {
   private buildDiscordPayload(eventType: NotificationDeliveryEventType, payload: Record<string, unknown>, deliveryId: string) {
     const incident = payload.incident as Record<string, unknown> | undefined;
     const monitor = payload.monitor as Record<string, unknown> | undefined;
-    const monitorName = String(monitor?.name ?? 'Service');
-    const monitorUrl = String(monitor?.url ?? '');
-    const reason = String(incident?.reason ?? 'No reason provided');
-    const startedAt = incident?.startedAt ? new Date(String(incident.startedAt)).toISOString() : '';
-    const resolvedAt = incident?.resolvedAt ? new Date(String(incident.resolvedAt)).toISOString() : '';
+    const monitorName = typeof monitor?.name === 'string' ? monitor.name : 'Service';
+    const monitorUrl = typeof monitor?.url === 'string' ? monitor.url : '';
+    const reason = typeof incident?.reason === 'string' ? incident.reason : 'No reason provided';
+    const startedAtValue = incident?.startedAt;
+    const resolvedAtValue = incident?.resolvedAt;
+    const startedAt = startedAtValue instanceof Date ? startedAtValue.toISOString() : typeof startedAtValue === 'string' ? new Date(startedAtValue).toISOString() : '';
+    const resolvedAt = resolvedAtValue instanceof Date ? resolvedAtValue.toISOString() : typeof resolvedAtValue === 'string' ? new Date(resolvedAtValue).toISOString() : '';
     const durationMs = Number(incident?.durationMs ?? 0);
 
     const title = eventType === 'INCIDENT_OPENED'

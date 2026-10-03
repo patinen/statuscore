@@ -5,6 +5,7 @@ import {
   IsArray,
   IsBoolean,
   IsEnum,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
@@ -68,7 +69,7 @@ export class UpdateNotificationChannelDto {
 export class NotificationDeliveryQueryDto {
   @IsOptional()
   @IsString()
-  @IsEnum(['all', 'pending', 'sent', 'failed'])
+  @IsIn(['all', 'pending', 'sent', 'failed'])
   status?: 'all' | 'pending' | 'sent' | 'failed';
 
   @IsOptional()

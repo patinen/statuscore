@@ -45,6 +45,25 @@ type MonitorCheckHistoryItem = {
   errorMessage: string | null;
 };
 
+type NotificationChannel = {
+  id: string;
+  name: string;
+  type: "DISCORD" | "WEBHOOK";
+  enabled: boolean;
+  endpointHost: string;
+  monitorIds: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+type NotificationChannelForm = {
+  name: string;
+  type: "DISCORD" | "WEBHOOK";
+  url: string;
+  enabled: boolean;
+  monitorIds: string[];
+};
+
 type IncidentStatus = "all" | "open" | "resolved";
 type NotificationDeliveryStatus = "all" | "pending" | "sent" | "failed";
 
@@ -99,6 +118,14 @@ const defaultForm: MonitorForm = {
   timeoutMs: 10000,
   failureThreshold: 3,
   enabled: true,
+};
+
+const defaultChannelForm: NotificationChannelForm = {
+  name: "",
+  type: "WEBHOOK",
+  url: "",
+  enabled: true,
+  monitorIds: [],
 };
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -162,9 +189,12 @@ export default function Home() {
   const [monitors, setMonitors] = useState<Monitor[]>([]);
   const [incidents, setIncidents] = useState<IncidentRecord[]>([]);
   const [notifications, setNotifications] = useState<NotificationDeliveryRecord[]>([]);
+  const [notificationChannels, setNotificationChannels] = useState<NotificationChannel[]>([]);
   const [incidentFilter, setIncidentFilter] = useState<IncidentStatus>("all");
   const [notificationFilter, setNotificationFilter] = useState<NotificationDeliveryStatus>("all");
   const [recentChecks, setRecentChecks] = useState<Record<string, MonitorCheckHistoryItem[]>>({});
+  const [channelForm, setChannelForm] = useState<NotificationChannelForm>(defaultChannelForm);
+  const [editingChannelId, setEditingChannelId] = useState<string | null>(null);
   const [isLoadingChecks, setIsLoadingChecks] = useState<Record<string, boolean>>({});
   const [expandedMonitorId, setExpandedMonitorId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -186,12 +216,16 @@ export default function Home() {
         }
 
         setUser(currentUser);
-        const list = await apiRequest<Monitor[]>("/monitors");
+        const [list, channels] = await Promise.all([
+          apiRequest<Monitor[]>("/monitors"),
+          apiRequest<NotificationChannel[]>("/notification-channels"),
+        ]);
         if (!isActive) {
           return;
         }
 
         setMonitors(list ?? []);
+        setNotificationChannels(channels ?? []);
         setError(null);
       } catch {
         if (!isActive) {
@@ -258,6 +292,11 @@ export default function Home() {
     setEditingId(null);
   };
 
+  const resetChannelForm = () => {
+    setChannelForm(defaultChannelForm);
+    setEditingChannelId(null);
+  };
+
   const updateForm = <K extends keyof MonitorForm>(key: K, value: MonitorForm[K]) => {
     setForm((currentForm) => ({ ...currentForm, [key]: value }));
   };
@@ -272,9 +311,113 @@ export default function Home() {
       setUser(null);
       setMonitors([]);
       setIncidents([]);
+      setNotifications([]);
+      setNotificationChannels([]);
       resetForm();
+      resetChannelForm();
     } catch (logoutError) {
       setError(logoutError instanceof Error ? logoutError.message : "Unable to log out.");
+    }
+  };
+
+  const loadNotificationChannels = async () => {
+    const channels = await apiRequest<NotificationChannel[]>("/notification-channels");
+    setNotificationChannels(channels ?? []);
+  };
+
+  const toggleChannelMonitor = (monitorId: string) => {
+    setChannelForm((current) => {
+      const nextMonitorIds = current.monitorIds.includes(monitorId)
+        ? current.monitorIds.filter((value) => value !== monitorId)
+        : [...current.monitorIds, monitorId];
+
+      return { ...current, monitorIds: nextMonitorIds };
+    });
+  };
+
+  const beginEditChannel = (channel: NotificationChannel) => {
+    setEditingChannelId(channel.id);
+    setChannelForm({
+      name: channel.name,
+      type: channel.type,
+      url: "",
+      enabled: channel.enabled,
+      monitorIds: channel.monitorIds,
+    });
+  };
+
+  const handleChannelSubmit = async () => {
+    if (!channelForm.name.trim()) {
+      setError("Channel name is required.");
+      return;
+    }
+
+    if (channelForm.monitorIds.length === 0) {
+      setError("Select at least one monitor for this channel.");
+      return;
+    }
+
+    if (!editingChannelId && !channelForm.url.trim()) {
+      setError("Webhook URL is required.");
+      return;
+    }
+
+    try {
+      setError(null);
+      const payload = {
+        name: channelForm.name.trim(),
+        type: channelForm.type,
+        enabled: channelForm.enabled,
+        monitorIds: channelForm.monitorIds,
+        ...(channelForm.url.trim() ? { url: channelForm.url.trim() } : {}),
+      };
+
+      if (editingChannelId) {
+        await apiRequest<void>(`/notification-channels/${editingChannelId}`, {
+          method: "PATCH",
+          body: JSON.stringify(payload),
+        });
+      } else {
+        await apiRequest<void>("/notification-channels", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+      }
+
+      await loadNotificationChannels();
+      resetChannelForm();
+    } catch (channelError) {
+      setError(channelError instanceof Error ? channelError.message : "Unable to save notification channel.");
+    }
+  };
+
+  const handleToggleChannel = async (channel: NotificationChannel) => {
+    try {
+      const updated = await apiRequest<NotificationChannel>(`/notification-channels/${channel.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: !channel.enabled }),
+      });
+
+      setNotificationChannels((current) => current.map((item) => (item.id === channel.id ? updated : item)));
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : "Unable to update notification channel.");
+    }
+  };
+
+  const handleDeleteChannel = async (channel: NotificationChannel) => {
+    if (!window.confirm(`Delete the notification channel "${channel.name}"?`)) {
+      return;
+    }
+
+    try {
+      setError(null);
+      await apiRequest<void>(`/notification-channels/${channel.id}`, { method: "DELETE" });
+      setNotificationChannels((current) => current.filter((item) => item.id !== channel.id));
+      if (editingChannelId === channel.id) {
+        resetChannelForm();
+      }
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : "Unable to delete notification channel.");
     }
   };
 
@@ -656,6 +799,164 @@ export default function Home() {
                         ))}
                       </div>
                     )}
+                  </div>
+
+                  <div className="rounded-lg border border-zinc-700 bg-zinc-950/40 p-5">
+                    <div className="mb-4 flex items-center justify-between gap-3">
+                      <h2 className="text-xl font-medium text-zinc-50">Notification channels</h2>
+                      {editingChannelId ? (
+                        <button
+                          type="button"
+                          onClick={resetChannelForm}
+                          className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200"
+                        >
+                          Cancel edit
+                        </button>
+                      ) : null}
+                    </div>
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <label className="block text-sm text-zinc-300 md:col-span-1">
+                        Channel name
+                        <input
+                          value={channelForm.name}
+                          onChange={(event) => setChannelForm((current) => ({ ...current, name: event.target.value }))}
+                          className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                          placeholder="Ops webhook"
+                        />
+                      </label>
+
+                      <label className="block text-sm text-zinc-300 md:col-span-1">
+                        Type
+                        <select
+                          value={channelForm.type}
+                          onChange={(event) => setChannelForm((current) => ({ ...current, type: event.target.value as 'DISCORD' | 'WEBHOOK' }))}
+                          className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                        >
+                          <option value="WEBHOOK">Generic webhook</option>
+                          <option value="DISCORD">Discord</option>
+                        </select>
+                      </label>
+
+                      <label className="block text-sm text-zinc-300 md:col-span-2">
+                        Webhook URL
+                        <input
+                          type="url"
+                          value={channelForm.url}
+                          onChange={(event) => setChannelForm((current) => ({ ...current, url: event.target.value }))}
+                          placeholder={editingChannelId ? 'Replace endpoint' : 'https://hooks.example.com/...'}
+                          className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                        />
+                      </label>
+
+                      {editingChannelId ? (
+                        <div className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900/60 p-3 text-sm text-zinc-300">
+                          Endpoint: {notificationChannels.find((channel) => channel.id === editingChannelId)?.endpointHost ?? 'configured'} — configured
+                        </div>
+                      ) : null}
+
+                      <label className="flex items-center justify-between rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-3 text-sm text-zinc-300 md:col-span-2">
+                        Enabled
+                        <input
+                          type="checkbox"
+                          checked={channelForm.enabled}
+                          onChange={(event) => setChannelForm((current) => ({ ...current, enabled: event.target.checked }))}
+                          className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-emerald-400"
+                        />
+                      </label>
+
+                      <div className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900/60 p-3">
+                        <div className="mb-2 text-sm font-medium text-zinc-200">Linked monitors</div>
+                        {monitors.length === 0 ? (
+                          <div className="text-sm text-zinc-400">No monitors available yet.</div>
+                        ) : (
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            {monitors.map((monitor) => (
+                              <label key={monitor.id} className="flex items-center gap-2 rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-sm text-zinc-200">
+                                <input
+                                  type="checkbox"
+                                  checked={channelForm.monitorIds.includes(monitor.id)}
+                                  onChange={() => toggleChannelMonitor(monitor.id)}
+                                  className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-emerald-400"
+                                />
+                                {monitor.name}
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-5 flex gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void handleChannelSubmit()}
+                        className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-slate-950"
+                      >
+                        {editingChannelId ? 'Save channel' : 'Add channel'}
+                      </button>
+                      {editingChannelId ? (
+                        <button
+                          type="button"
+                          onClick={resetChannelForm}
+                          className="rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-200"
+                        >
+                          Reset
+                        </button>
+                      ) : null}
+                    </div>
+
+                    {notificationChannels.length > 0 ? (
+                      <div className="mt-6 space-y-3">
+                        {notificationChannels.map((channel) => {
+                          const monitorNames = channel.monitorIds
+                            .map((monitorId) => monitors.find((monitor) => monitor.id === monitorId)?.name)
+                            .filter((name): name is string => Boolean(name));
+
+                          return (
+                            <div key={channel.id} className="rounded-md border border-zinc-700 bg-zinc-950/70 p-3">
+                              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                                <div>
+                                  <div className="text-sm font-medium text-zinc-100">{channel.name}</div>
+                                  <div className="mt-1 text-xs text-zinc-400">
+                                    {channel.type === 'DISCORD' ? 'Discord' : 'Webhook'} · {channel.enabled ? 'Enabled' : 'Disabled'}
+                                  </div>
+                                </div>
+                                <div className="text-xs text-zinc-300">Endpoint: {channel.endpointHost}</div>
+                              </div>
+
+                              <div className="mt-2 text-xs text-zinc-400">
+                                Monitors: {monitorNames.length > 0 ? monitorNames.join(', ') : 'None'}
+                              </div>
+
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => void handleToggleChannel(channel)}
+                                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-100"
+                                >
+                                  {channel.enabled ? 'Disable' : 'Enable'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => beginEditChannel(channel)}
+                                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-100"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDeleteChannel(channel)}
+                                  className="rounded-md border border-red-700 bg-red-950/30 px-3 py-2 text-xs text-red-200"
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : null}
                   </div>
 
                   <div className="rounded-lg border border-zinc-700 bg-zinc-950/40 p-5">
