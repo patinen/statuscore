@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
+import { AnalyticsModule } from './analytics/analytics.module.js';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { AuthModule } from './auth/auth.module.js';
@@ -21,6 +22,7 @@ import { StatusPagesModule } from './status-pages/status-pages.module.js';
     ScheduleModule.forRoot(),
     DatabaseModule,
     AuthModule,
+    AnalyticsModule,
     MonitorsModule,
     IncidentsModule,
     MonitoringModule,

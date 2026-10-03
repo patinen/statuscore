@@ -2,9 +2,9 @@
 
 StatusCore is a self-hosted monitoring platform for public services, built around GitHub authentication, monitor management, and safe HTTP checks.
 
-## Phase 6 implemented
+## Phase 7 implemented
 
-This repository includes the following Phase 5 and Phase 6 features:
+This repository includes the following Phase 5, Phase 6, and Phase 7 features:
 
 - GitHub OAuth authentication with the minimum required profile scope
 - authenticated monitor CRUD and check history
@@ -28,6 +28,21 @@ This repository now also includes Phase 6 public status pages:
 - safe public serialization that omits monitor URLs, webhook secrets, user identity, and internal error details
 - monitor ordering and public availability semantics for enabled and disabled monitors
 
+This repository now also includes Phase 7 uptime and latency analytics:
+
+- authenticated monitor analytics endpoint: `GET /monitors/:id/analytics?range=24h|7d|30d`
+- authenticated overview analytics endpoint: `GET /analytics/overview?range=24h|7d|30d`
+- check-based uptime percentage computed as successful checks / total checks within the selected range
+- latency statistics from successful checks with non-null response times (average, min, max, p50, p95, p99)
+- incident downtime summaries including overlap-aware total downtime and longest downtime span
+- bounded historical bucket series with fixed resolutions:
+	- `24h`: 15-minute buckets
+	- `7d`: 1-hour buckets
+	- `30d`: 6-hour buckets
+- dashboard analytics cards and monitor-level charts for uptime and average latency
+
+Uptime percentage is calculated from recorded monitoring checks and is not an SLA guarantee.
+
 ## Current scope
 
 The project remains focused on the following operational capabilities:
@@ -38,11 +53,10 @@ The project remains focused on the following operational capabilities:
 - delivery retry and resilient outbox processing
 - secure outbound networking constraints
 - public read-only status pages for selected monitors
+- authenticated analytics for uptime, latency, incidents, and historical trend buckets
 
 The following capabilities remain intentionally out of scope for this phase:
 
-- uptime/latency analytics
-- charts
 - SSE/WebSockets
 - retention/rollups
 - SLA reporting
@@ -51,6 +65,8 @@ The following capabilities remain intentionally out of scope for this phase:
 - maintenance windows
 - manual incidents
 - subscriber email/SMS notifications
+- public historical uptime analytics
+- multi-region monitoring
 
 ## Current stack
 
@@ -192,3 +208,23 @@ The public status page flow is:
 - the public API serves only safe page, monitor status, and incident history fields
 - the web status page at `/status/<slug>` polls the public API every 30 seconds
 - public pages intentionally do not expose monitor URLs, webhook URLs, encrypted secrets, user data, or raw check errors
+
+## Analytics notes
+
+Phase 7 analytics use fixed bounded ranges (`24h`, `7d`, `30d`) and UTC timestamps internally.
+
+- no arbitrary unbounded range queries are exposed yet
+- failed checks and null response times are excluded from latency calculations
+- unresolved incidents contribute downtime through the request `to` timestamp
+- overlapping incident intervals are merged for downtime duration aggregation to avoid double counting
+- public status pages remain unchanged and do not expose analytics history in this phase
+
+Analytics currently query raw `CheckResult` and `Incident` records with bounded aggregation. Future retention/rollups can replace raw-history query paths while preserving API contracts.
+
+## Planned future enhancements
+
+- retention/rollups for long-term analytics efficiency
+- public historical uptime views
+- maintenance windows
+- custom domains
+- multi-region monitoring

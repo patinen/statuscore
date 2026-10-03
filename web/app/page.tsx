@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { LatencySeriesChart, UptimeSeriesChart } from "./analytics-charts";
 
 type User = {
   id: string;
@@ -43,6 +44,55 @@ type MonitorCheckHistoryItem = {
   responseTimeMs: number | null;
   errorType: string | null;
   errorMessage: string | null;
+};
+
+type AnalyticsRange = "24h" | "7d" | "30d";
+
+type AnalyticsOverview = {
+  range: AnalyticsRange;
+  from: string;
+  to: string;
+  monitorCount: number;
+  operationalCount: number;
+  outageCount: number;
+  unknownCount: number;
+  averageUptimePercentage: number | null;
+  openIncidentCount: number;
+};
+
+type MonitorAnalytics = {
+  range: AnalyticsRange;
+  from: string;
+  to: string;
+  checks: {
+    total: number;
+    successful: number;
+    failed: number;
+  };
+  uptime: {
+    percentage: number | null;
+  };
+  latency: {
+    averageMs: number | null;
+    minMs: number | null;
+    maxMs: number | null;
+    p50Ms: number | null;
+    p95Ms: number | null;
+    p99Ms: number | null;
+  };
+  incidents: {
+    total: number;
+    totalDowntimeMs: number;
+    longestDowntimeMs: number;
+  };
+  series: Array<{
+    start: string;
+    end: string;
+    checkCount: number;
+    successCount: number;
+    uptimePercentage: number | null;
+    averageResponseTimeMs: number | null;
+  }>;
 };
 
 type NotificationChannel = {
@@ -163,6 +213,8 @@ const defaultStatusPageForm: StatusPageForm = {
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
+const analyticsRanges: AnalyticsRange[] = ["24h", "7d", "30d"];
+
 async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
     ...init,
@@ -217,6 +269,9 @@ const formatDuration = (durationMs: number) => {
   return `${seconds}s`;
 };
 
+const formatPercentage = (value: number | null) => (value === null ? "—" : `${value.toFixed(2)}%`);
+const formatLatency = (value: number | null) => (value === null ? "—" : `${value.toFixed(1)} ms`);
+
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [monitors, setMonitors] = useState<Monitor[]>([]);
@@ -234,6 +289,12 @@ export default function Home() {
   const [editingStatusPageDescription, setEditingStatusPageDescription] = useState<string | null>(null);
   const [isLoadingChecks, setIsLoadingChecks] = useState<Record<string, boolean>>({});
   const [expandedMonitorId, setExpandedMonitorId] = useState<string | null>(null);
+  const [analyticsRange, setAnalyticsRange] = useState<AnalyticsRange>("24h");
+  const [analyticsOverview, setAnalyticsOverview] = useState<AnalyticsOverview | null>(null);
+  const [selectedMonitorId, setSelectedMonitorId] = useState<string | null>(null);
+  const [monitorAnalytics, setMonitorAnalytics] = useState<MonitorAnalytics | null>(null);
+  const [isLoadingAnalytics, setIsLoadingAnalytics] = useState(false);
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [form, setForm] = useState<MonitorForm>(defaultForm);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -241,6 +302,17 @@ export default function Home() {
 
   const isAuthenticated = Boolean(user);
   const headerLabel = useMemo(() => (isAuthenticated ? "Connected" : "Self-hosted"), [isAuthenticated]);
+  const activeAnalyticsMonitorId = useMemo(() => {
+    if (!isAuthenticated) {
+      return null;
+    }
+
+    if (selectedMonitorId && monitors.some((monitor) => monitor.id === selectedMonitorId)) {
+      return selectedMonitorId;
+    }
+
+    return monitors[0]?.id ?? null;
+  }, [isAuthenticated, monitors, selectedMonitorId]);
 
   useEffect(() => {
     let isActive = true;
@@ -273,6 +345,10 @@ export default function Home() {
 
         setUser(null);
         setMonitors([]);
+        setSelectedMonitorId(null);
+        setMonitorAnalytics(null);
+        setAnalyticsOverview(null);
+        setAnalyticsError(null);
       } finally {
         if (isActive) {
           setIsLoading(false);
@@ -328,6 +404,54 @@ export default function Home() {
     };
   }, [user, incidentFilter, notificationFilter]);
 
+  useEffect(() => {
+    if (!user) {
+      return undefined;
+    }
+
+    let cancelled = false;
+
+    const loadAnalytics = async () => {
+      try {
+        setIsLoadingAnalytics(true);
+        const [overview, monitorData] = await Promise.all([
+          apiRequest<AnalyticsOverview>(`/analytics/overview?range=${analyticsRange}`),
+          activeAnalyticsMonitorId
+            ? apiRequest<MonitorAnalytics>(`/monitors/${activeAnalyticsMonitorId}/analytics?range=${analyticsRange}`)
+            : Promise.resolve(null),
+        ]);
+
+        if (cancelled) {
+          return;
+        }
+
+        setAnalyticsOverview(overview);
+        setMonitorAnalytics(monitorData);
+        setAnalyticsError(null);
+      } catch (loadError) {
+        if (cancelled) {
+          return;
+        }
+
+        setAnalyticsError(loadError instanceof Error ? loadError.message : "Unable to load analytics data.");
+      } finally {
+        if (!cancelled) {
+          setIsLoadingAnalytics(false);
+        }
+      }
+    };
+
+    void loadAnalytics();
+    const intervalId = setInterval(() => {
+      void loadAnalytics();
+    }, 30000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+    };
+  }, [user, analyticsRange, activeAnalyticsMonitorId]);
+
   const resetForm = () => {
     setForm(defaultForm);
     setEditingId(null);
@@ -361,6 +485,10 @@ export default function Home() {
       setNotifications([]);
       setNotificationChannels([]);
       setStatusPages([]);
+      setAnalyticsOverview(null);
+      setMonitorAnalytics(null);
+      setAnalyticsError(null);
+      setSelectedMonitorId(null);
       resetForm();
       resetChannelForm();
       resetStatusPageForm();
@@ -909,6 +1037,148 @@ export default function Home() {
                     {error}
                   </div>
                 ) : null}
+
+                <div className="rounded-lg border border-zinc-700 bg-zinc-950/40 p-5">
+                  <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <h2 className="text-xl font-medium text-zinc-50">Analytics</h2>
+                      <p className="mt-1 text-xs text-zinc-400">
+                        Uptime percentage is calculated from recorded monitoring checks and is not an SLA guarantee.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900 p-1">
+                      {analyticsRanges.map((rangeValue) => (
+                        <button
+                          key={rangeValue}
+                          type="button"
+                          onClick={() => setAnalyticsRange(rangeValue)}
+                          className={[
+                            "rounded-full px-3 py-1.5 text-[10px] font-medium uppercase tracking-[0.15em] transition",
+                            analyticsRange === rangeValue
+                              ? "bg-emerald-500 text-slate-950"
+                              : "text-zinc-300 hover:text-zinc-100",
+                          ].join(" ")}
+                        >
+                          {rangeValue}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {analyticsError ? (
+                    <div className="mb-4 rounded-md border border-red-700/60 bg-red-950/30 px-3 py-2 text-sm text-red-200">
+                      {analyticsError}
+                    </div>
+                  ) : null}
+
+                  <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                    <div className="rounded-md border border-zinc-700 bg-zinc-900/50 p-3">
+                      <div className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">Monitors</div>
+                      <div className="mt-1 text-xl font-semibold text-zinc-100">{analyticsOverview?.monitorCount ?? "—"}</div>
+                    </div>
+                    <div className="rounded-md border border-zinc-700 bg-zinc-900/50 p-3">
+                      <div className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">Operational</div>
+                      <div className="mt-1 text-xl font-semibold text-emerald-300">{analyticsOverview?.operationalCount ?? "—"}</div>
+                    </div>
+                    <div className="rounded-md border border-zinc-700 bg-zinc-900/50 p-3">
+                      <div className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">Outage</div>
+                      <div className="mt-1 text-xl font-semibold text-red-300">{analyticsOverview?.outageCount ?? "—"}</div>
+                    </div>
+                    <div className="rounded-md border border-zinc-700 bg-zinc-900/50 p-3">
+                      <div className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">Open incidents</div>
+                      <div className="mt-1 text-xl font-semibold text-zinc-100">{analyticsOverview?.openIncidentCount ?? "—"}</div>
+                    </div>
+                    <div className="rounded-md border border-zinc-700 bg-zinc-900/50 p-3">
+                      <div className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">Avg uptime</div>
+                      <div className="mt-1 text-xl font-semibold text-zinc-100">
+                        {formatPercentage(analyticsOverview?.averageUptimePercentage ?? null)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mb-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_3fr]">
+                    <label className="block text-sm text-zinc-300">
+                      Selected monitor
+                      <select
+                        value={activeAnalyticsMonitorId ?? ""}
+                        onChange={(event) => setSelectedMonitorId(event.target.value || null)}
+                        className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                        disabled={monitors.length === 0}
+                      >
+                        {monitors.length === 0 ? <option value="">No monitors available</option> : null}
+                        {monitors.map((monitor) => (
+                          <option key={monitor.id} value={monitor.id}>
+                            {monitor.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+
+                    <div className="rounded-md border border-zinc-700 bg-zinc-900/50 p-3">
+                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                        <div>
+                          <div className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">Uptime</div>
+                          <div className="mt-1 text-lg font-semibold text-zinc-100">
+                            {formatPercentage(monitorAnalytics?.uptime.percentage ?? null)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">Checks</div>
+                          <div className="mt-1 text-lg font-semibold text-zinc-100">{monitorAnalytics?.checks.total ?? "—"}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">Failed checks</div>
+                          <div className="mt-1 text-lg font-semibold text-red-300">{monitorAnalytics?.checks.failed ?? "—"}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">Avg latency</div>
+                          <div className="mt-1 text-lg font-semibold text-zinc-100">
+                            {formatLatency(monitorAnalytics?.latency.averageMs ?? null)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">p95 latency</div>
+                          <div className="mt-1 text-lg font-semibold text-zinc-100">
+                            {formatLatency(monitorAnalytics?.latency.p95Ms ?? null)}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">Incidents</div>
+                          <div className="mt-1 text-lg font-semibold text-zinc-100">{monitorAnalytics?.incidents.total ?? "—"}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">Downtime</div>
+                          <div className="mt-1 text-lg font-semibold text-zinc-100">
+                            {monitorAnalytics ? formatDuration(monitorAnalytics.incidents.totalDowntimeMs) : "—"}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] uppercase tracking-[0.15em] text-zinc-500">Longest incident</div>
+                          <div className="mt-1 text-lg font-semibold text-zinc-100">
+                            {monitorAnalytics ? formatDuration(monitorAnalytics.incidents.longestDowntimeMs) : "—"}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {isLoadingAnalytics ? (
+                    <div className="text-sm text-zinc-400">Loading analytics…</div>
+                  ) : monitors.length === 0 ? (
+                    <div className="rounded-md border border-zinc-700 bg-zinc-900/50 p-3 text-sm text-zinc-400">
+                      No monitors available yet. Add a monitor to start collecting analytics.
+                    </div>
+                  ) : monitorAnalytics && monitorAnalytics.checks.total === 0 ? (
+                    <div className="rounded-md border border-zinc-700 bg-zinc-900/50 p-3 text-sm text-zinc-400">
+                      No monitoring data is available for this range yet.
+                    </div>
+                  ) : monitorAnalytics ? (
+                    <div className="space-y-3">
+                      <UptimeSeriesChart series={monitorAnalytics.series} />
+                      <LatencySeriesChart series={monitorAnalytics.series} />
+                    </div>
+                  ) : null}
+                </div>
 
                 <div className="space-y-6">
                   <div className="rounded-lg border border-zinc-700 bg-zinc-950/40 p-5">
