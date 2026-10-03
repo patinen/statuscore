@@ -30,11 +30,22 @@ const createService = (overrides: Record<string, unknown> = {}) => {
     incident: {
       findMany: vi.fn(),
     },
+    maintenanceWindow: {
+      findMany: vi.fn(),
+    },
     $transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(prisma)),
     ...overrides,
   };
 
-  return { prisma, service: new StatusPagesService(prisma as never) };
+  const maintenanceWindowsService = {
+    getActivePublicMaintenanceForMonitors: vi.fn().mockResolvedValue([]),
+  };
+
+  return {
+    prisma,
+    maintenanceWindowsService,
+    service: new StatusPagesService(prisma as never, maintenanceWindowsService as never),
+  };
 };
 
 describe('StatusPage DTOs', () => {
@@ -419,7 +430,7 @@ describe('StatusPagesService ownership and CRUD', () => {
 
 describe('StatusPagesService public status API', () => {
   it('returns a safe public response for enabled pages and maps monitor states and incidents', async () => {
-    const { service, prisma } = createService();
+    const { service, prisma, maintenanceWindowsService } = createService();
 
     prisma.statusPage.findFirst.mockResolvedValueOnce({
       id: 'page-1',
@@ -451,6 +462,8 @@ describe('StatusPagesService public status API', () => {
         { monitorId: 'monitor-2', startedAt: new Date('2026-10-01T00:00:00Z'), resolvedAt: now, reason: 'Recovered' },
       ]);
 
+    maintenanceWindowsService.getActivePublicMaintenanceForMonitors.mockResolvedValueOnce([]);
+
     const result = await service.getPublicBySlug('my-services');
 
     expect(result).toMatchObject({
@@ -472,6 +485,7 @@ describe('StatusPagesService public status API', () => {
         { monitorName: 'API', reason: 'Recovered' },
         { monitorName: 'Docs', reason: 'Recovered' },
       ],
+      activeMaintenance: [],
     });
 
     expect(result?.page).not.toHaveProperty('userId');
@@ -480,7 +494,7 @@ describe('StatusPagesService public status API', () => {
   });
 
   it('returns outage when any included monitor is down and unknown when all are unknown or disabled', async () => {
-    const { service, prisma } = createService();
+    const { service, prisma, maintenanceWindowsService } = createService();
 
     prisma.statusPage.findFirst
       .mockResolvedValueOnce({
@@ -510,6 +524,7 @@ describe('StatusPagesService public status API', () => {
       .mockResolvedValueOnce(null);
 
     prisma.incident.findMany.mockResolvedValue([]);
+    maintenanceWindowsService.getActivePublicMaintenanceForMonitors.mockResolvedValue([]);
 
     await expect(service.getPublicBySlug('ops')).resolves.toMatchObject({ overallStatus: 'OUTAGE' });
     await expect(service.getPublicBySlug('unknown')).resolves.toMatchObject({ overallStatus: 'UNKNOWN' });
@@ -517,7 +532,7 @@ describe('StatusPagesService public status API', () => {
   });
 
   it('keeps public incident history bounded, sorted, and scoped to included monitors', async () => {
-    const { service, prisma } = createService();
+    const { service, prisma, maintenanceWindowsService } = createService();
 
     prisma.statusPage.findFirst.mockResolvedValueOnce({
       id: 'page-1',
@@ -546,6 +561,8 @@ describe('StatusPagesService public status API', () => {
       ])
       .mockImplementationOnce(async (args: { take?: number }) => recentHistory.slice(0, args.take ?? recentHistory.length));
 
+    maintenanceWindowsService.getActivePublicMaintenanceForMonitors.mockResolvedValueOnce([]);
+
     const result = await service.getPublicBySlug('my-services');
 
     expect(prisma.incident.findMany).toHaveBeenNthCalledWith(
@@ -573,5 +590,82 @@ describe('StatusPagesService public status API', () => {
     expect(result?.recentIncidents).toHaveLength(20);
     expect(result?.recentIncidents[0].reason).toBe('Resolved 0');
     expect(result?.recentIncidents[19].reason).toBe('Resolved 19');
+  });
+
+  it('maps active maintenance to MAINTENANCE monitor state and maintenance-aware overall status', async () => {
+    const { service, prisma, maintenanceWindowsService } = createService();
+
+    prisma.statusPage.findFirst
+      .mockResolvedValueOnce({
+        id: 'page-1',
+        name: 'Maintenance Window',
+        slug: 'maintenance-window',
+        description: null,
+        enabled: true,
+        updatedAt: now,
+        monitorAssociations: [
+          { monitorId: 'monitor-1', displayName: null, monitor: { name: 'API', enabled: true, currentStatus: 'DOWN', lastCheckedAt: now } },
+          { monitorId: 'monitor-2', displayName: null, monitor: { name: 'Docs', enabled: true, currentStatus: 'UP', lastCheckedAt: now } },
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: 'page-2',
+        name: 'Outage and Maintenance',
+        slug: 'outage-and-maintenance',
+        description: null,
+        enabled: true,
+        updatedAt: now,
+        monitorAssociations: [
+          { monitorId: 'monitor-3', displayName: null, monitor: { name: 'Web', enabled: true, currentStatus: 'DOWN', lastCheckedAt: now } },
+          { monitorId: 'monitor-4', displayName: null, monitor: { name: 'DB', enabled: true, currentStatus: 'DOWN', lastCheckedAt: now } },
+        ],
+      });
+
+    prisma.incident.findMany.mockResolvedValue([]);
+
+    maintenanceWindowsService.getActivePublicMaintenanceForMonitors
+      .mockResolvedValueOnce([
+        {
+          title: 'Database upgrade',
+          description: 'Short maintenance',
+          startsAt: now,
+          endsAt: new Date(now.getTime() + 60_000),
+          monitorIds: ['monitor-1'],
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          title: 'DB maintenance',
+          description: null,
+          startsAt: now,
+          endsAt: new Date(now.getTime() + 60_000),
+          monitorIds: ['monitor-4'],
+        },
+      ]);
+
+    const maintenanceOnly = await service.getPublicBySlug('maintenance-window');
+    const outageAndMaintenance = await service.getPublicBySlug('outage-and-maintenance');
+
+    expect(maintenanceOnly).toMatchObject({
+      overallStatus: 'MAINTENANCE',
+      monitors: [
+        { name: 'API', status: 'MAINTENANCE' },
+        { name: 'Docs', status: 'OPERATIONAL' },
+      ],
+      activeMaintenance: [
+        {
+          title: 'Database upgrade',
+          monitors: ['API'],
+        },
+      ],
+    });
+
+    expect(outageAndMaintenance).toMatchObject({
+      overallStatus: 'OUTAGE',
+      monitors: [
+        { name: 'Web', status: 'OUTAGE' },
+        { name: 'DB', status: 'MAINTENANCE' },
+      ],
+    });
   });
 });

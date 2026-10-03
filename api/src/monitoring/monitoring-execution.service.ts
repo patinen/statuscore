@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service.js';
+import { MaintenanceWindowsService } from '../maintenance-windows/maintenance-windows.service.js';
 import { NotificationDeliveryService } from '../notifications/notification-delivery.service.js';
 import { SafeHttpClientService } from './safe-http-client.service.js';
 
@@ -13,6 +14,7 @@ export class MonitorExecutionService {
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(SafeHttpClientService) private readonly safeHttpClient: SafeHttpClientService,
+    @Inject(MaintenanceWindowsService) private readonly maintenanceWindowsService?: MaintenanceWindowsService,
     @Inject(NotificationDeliveryService) private readonly notificationDeliveryService?: NotificationDeliveryService,
   ) {}
 
@@ -156,11 +158,21 @@ export class MonitorExecutionService {
         }
 
         const checkedAt = new Date();
+        const failureDuringMaintenance =
+          !result.success &&
+          (await this.maintenanceWindowsService?.isMonitorUnderActiveMaintenanceAtTx(tx, state.id, checkedAt));
+
         const previousStatus = state.currentStatus;
-        const newConsecutiveFailures = result.success ? 0 : state.consecutiveFailures + 1;
+        const newConsecutiveFailures = result.success
+          ? 0
+          : failureDuringMaintenance
+            ? 0
+            : state.consecutiveFailures + 1;
         const nextStatus = result.success
           ? 'UP'
-          : newConsecutiveFailures >= state.failureThreshold
+          : failureDuringMaintenance
+            ? previousStatus
+            : newConsecutiveFailures >= state.failureThreshold
             ? 'DOWN'
             : previousStatus === 'UNKNOWN'
               ? 'UNKNOWN'
@@ -210,7 +222,7 @@ export class MonitorExecutionService {
               `Monitor ${monitorId} recovered to UP without an open incident. Preserving recovered state without creating a synthetic incident.`,
             );
           }
-        } else if (previousStatus === 'DOWN' && !result.success && activeIncident) {
+        } else if (previousStatus === 'DOWN' && !result.success && activeIncident && !failureDuringMaintenance) {
           await tx.incident.update({
             where: { id: activeIncident.id },
             data: {
@@ -236,7 +248,7 @@ export class MonitorExecutionService {
           where: { id: state.id },
           data: {
             currentStatus: nextStatus,
-            consecutiveFailures: result.success ? 0 : newConsecutiveFailures,
+            consecutiveFailures: newConsecutiveFailures,
             lastCheckedAt: checkedAt,
           },
         });

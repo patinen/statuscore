@@ -474,6 +474,253 @@ describe('MonitorExecutionService state transitions', () => {
   });
 });
 
+describe('MonitorExecutionService maintenance behavior', () => {
+  it('persists failed checks during maintenance without opening incidents or transitioning UP to DOWN', async () => {
+    const tx = {
+      checkResult: { create: vi.fn().mockResolvedValue(undefined) },
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'UP',
+          consecutiveFailures: 2,
+          failureThreshold: 3,
+          expectedStatusCode: 200,
+          url: 'https://example.com',
+          method: 'GET',
+          timeoutMs: 1000,
+        }),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+      incident: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+      maintenanceWindowMonitor: {
+        findFirst: vi.fn().mockResolvedValue({ maintenanceWindowId: 'mw-1' }),
+      },
+    };
+
+    const prisma = {
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'UP',
+          consecutiveFailures: 2,
+          failureThreshold: 3,
+          url: 'https://example.com',
+          method: 'GET',
+          expectedStatusCode: 200,
+          timeoutMs: 1000,
+        }),
+      },
+      $transaction: vi.fn(async (callback) => callback(tx)),
+    };
+
+    const notificationDeliveryService = {
+      createForIncidentTransition: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const maintenanceWindowsService = {
+      isMonitorUnderActiveMaintenanceAtTx: vi.fn(async () => true),
+    };
+
+    const service = new MonitorExecutionService(
+      prisma as never,
+      {
+        executeCheck: vi.fn().mockResolvedValue({
+          success: false,
+          statusCode: 500,
+          responseTimeMs: 12,
+          errorType: 'UNEXPECTED_STATUS',
+          errorMessage: 'Unexpected status code 500.',
+        }),
+      } as never,
+      maintenanceWindowsService as never,
+      notificationDeliveryService as never,
+    );
+
+    await service.processMonitorCheck('m1');
+
+    expect(tx.checkResult.create).toHaveBeenCalledTimes(1);
+    expect(tx.incident.create).not.toHaveBeenCalled();
+    expect(notificationDeliveryService.createForIncidentTransition).not.toHaveBeenCalled();
+    expect(tx.monitor.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          currentStatus: 'UP',
+          consecutiveFailures: 0,
+        }),
+      }),
+    );
+    expect(maintenanceWindowsService.isMonitorUnderActiveMaintenanceAtTx).toHaveBeenCalledWith(
+      tx,
+      'm1',
+      expect.any(Date),
+    );
+  });
+
+  it('does not duplicate or mutate existing DOWN incident on failure during maintenance', async () => {
+    const tx = {
+      checkResult: { create: vi.fn().mockResolvedValue(undefined) },
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'DOWN',
+          consecutiveFailures: 8,
+          failureThreshold: 3,
+          expectedStatusCode: 200,
+          url: 'https://example.com',
+          method: 'GET',
+          timeoutMs: 1000,
+        }),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+      incident: {
+        findFirst: vi.fn().mockResolvedValue({ id: 'incident-1', reason: 'Existing', lastError: 'Old error' }),
+        create: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+      maintenanceWindowMonitor: {
+        findFirst: vi.fn().mockResolvedValue({ maintenanceWindowId: 'mw-1' }),
+      },
+    };
+
+    const prisma = {
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'DOWN',
+          consecutiveFailures: 8,
+          failureThreshold: 3,
+          url: 'https://example.com',
+          method: 'GET',
+          expectedStatusCode: 200,
+          timeoutMs: 1000,
+        }),
+      },
+      $transaction: vi.fn(async (callback) => callback(tx)),
+    };
+
+    const service = new MonitorExecutionService(
+      prisma as never,
+      {
+        executeCheck: vi.fn().mockResolvedValue({
+          success: false,
+          statusCode: 500,
+          responseTimeMs: 8,
+          errorType: 'UNEXPECTED_STATUS',
+          errorMessage: 'Unexpected status code 500.',
+        }),
+      } as never,
+      { isMonitorUnderActiveMaintenanceAtTx: vi.fn(async () => true) } as never,
+    );
+
+    await service.processMonitorCheck('m1');
+
+    expect(tx.incident.create).not.toHaveBeenCalled();
+    expect(tx.incident.update).not.toHaveBeenCalled();
+    expect(tx.monitor.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          currentStatus: 'DOWN',
+          consecutiveFailures: 0,
+        }),
+      }),
+    );
+  });
+
+  it('allows successful recovery during maintenance and resolves open incidents', async () => {
+    const tx = {
+      checkResult: { create: vi.fn().mockResolvedValue(undefined) },
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'DOWN',
+          consecutiveFailures: 4,
+          failureThreshold: 3,
+          expectedStatusCode: 200,
+          url: 'https://example.com',
+          method: 'GET',
+          timeoutMs: 1000,
+        }),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+      incident: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'incident-1',
+          monitorId: 'm1',
+          startedAt: new Date('2024-01-01T00:00:00Z'),
+          resolvedAt: null,
+          reason: 'Expected HTTP 200 but received 500.',
+          lastError: 'Unexpected status code 500.',
+        }),
+        create: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue({ id: 'incident-1' }),
+      },
+      maintenanceWindowMonitor: {
+        findFirst: vi.fn().mockResolvedValue({ maintenanceWindowId: 'mw-1' }),
+      },
+      monitorNotificationChannel: {
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+    };
+
+    const prisma = {
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'DOWN',
+          consecutiveFailures: 4,
+          failureThreshold: 3,
+          url: 'https://example.com',
+          method: 'GET',
+          expectedStatusCode: 200,
+          timeoutMs: 1000,
+        }),
+      },
+      $transaction: vi.fn(async (callback) => callback(tx)),
+    };
+
+    const notificationDeliveryService = {
+      createForIncidentTransition: vi.fn().mockResolvedValue(undefined),
+    };
+
+    const service = new MonitorExecutionService(
+      prisma as never,
+      {
+        executeCheck: vi.fn().mockResolvedValue({
+          success: true,
+          statusCode: 200,
+          responseTimeMs: 9,
+          errorType: null,
+          errorMessage: null,
+        }),
+      } as never,
+      { isMonitorUnderActiveMaintenanceAtTx: vi.fn(async () => true) } as never,
+      notificationDeliveryService as never,
+    );
+
+    await service.processMonitorCheck('m1');
+
+    expect(tx.incident.update).toHaveBeenCalledTimes(1);
+    expect(tx.monitor.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          currentStatus: 'UP',
+          consecutiveFailures: 0,
+        }),
+      }),
+    );
+  });
+});
+
 describe('Incident lifecycle and access rules', () => {
   it('UNKNOWN failure below threshold does not open an incident', async () => {
     const tx = {

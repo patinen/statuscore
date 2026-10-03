@@ -1,6 +1,7 @@
 import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { CheckResult, Incident, Monitor } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service.js';
+import { MaintenanceWindowsService, type ActiveMaintenanceSummary } from '../maintenance-windows/maintenance-windows.service.js';
 import type { SessionUser } from '../auth/auth.service.js';
 import { TargetUrlValidationService } from './ssrf-validation.service.js';
 
@@ -16,13 +17,14 @@ export class MonitorService {
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(TargetUrlValidationService) private readonly targetUrlValidationService: TargetUrlValidationService,
+    @Inject(MaintenanceWindowsService) private readonly maintenanceWindowsService?: MaintenanceWindowsService,
   ) {}
 
   private nextCheckAtFor(enabled: boolean): Date | null {
     return enabled ? new Date() : null;
   }
 
-  private serializeMonitor(monitor: MonitorWithLatestCheck) {
+  private serializeMonitor(monitor: MonitorWithLatestCheck, activeMaintenance: ActiveMaintenanceSummary | null) {
     const latestCheck = Array.isArray(monitor.checkResults) ? (monitor.checkResults[0] ?? null) : null;
     const activeIncident = Array.isArray(monitor.incidents) ? (monitor.incidents[0] ?? null) : null;
 
@@ -44,6 +46,14 @@ export class MonitorService {
       latestStatusCode: latestCheck?.statusCode ?? null,
       latestResponseTimeMs: latestCheck?.responseTimeMs ?? null,
       latestSuccess: latestCheck?.success ?? null,
+      activeMaintenance: activeMaintenance
+        ? {
+            id: activeMaintenance.id,
+            title: activeMaintenance.title,
+            startsAt: activeMaintenance.startsAt,
+            endsAt: activeMaintenance.endsAt,
+          }
+        : null,
       activeIncident: activeIncident
         ? {
             id: activeIncident.id,
@@ -56,6 +66,7 @@ export class MonitorService {
   }
 
   async listForUser(userId: string) {
+    const now = new Date();
     const monitors = await this.prisma.monitor.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
@@ -72,10 +83,24 @@ export class MonitorService {
       },
     });
 
-    return monitors.map((monitor) => this.serializeMonitor(monitor as MonitorWithLatestCheck));
+    const activeMaintenanceByMonitorId = this.maintenanceWindowsService
+      ? await this.maintenanceWindowsService.getActiveMaintenanceForUserMonitors(
+          userId,
+          monitors.map((monitor) => monitor.id),
+          now,
+        )
+      : new Map<string, ActiveMaintenanceSummary>();
+
+    return monitors.map((monitor) =>
+      this.serializeMonitor(
+        monitor as MonitorWithLatestCheck,
+        activeMaintenanceByMonitorId.get(monitor.id) ?? null,
+      ),
+    );
   }
 
   async getForUser(userId: string, monitorId: string) {
+    const now = new Date();
     const monitor = await this.prisma.monitor.findFirst({
       where: { id: monitorId, userId },
       include: {
@@ -95,7 +120,14 @@ export class MonitorService {
       throw new NotFoundException('Monitor not found.');
     }
 
-    return this.serializeMonitor(monitor as MonitorWithLatestCheck);
+    const activeMaintenanceByMonitorId = this.maintenanceWindowsService
+      ? await this.maintenanceWindowsService.getActiveMaintenanceForUserMonitors(userId, [monitor.id], now)
+      : new Map<string, ActiveMaintenanceSummary>();
+
+    return this.serializeMonitor(
+      monitor as MonitorWithLatestCheck,
+      activeMaintenanceByMonitorId.get(monitor.id) ?? null,
+    );
   }
 
   async getChecksForUser(userId: string, monitorId: string, limit = 50) {

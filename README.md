@@ -2,9 +2,9 @@
 
 StatusCore is a self-hosted monitoring platform for public services, built around GitHub authentication, monitor management, and safe HTTP checks.
 
-## Phase 7 implemented
+## Phase 8 implemented
 
-This repository includes the following Phase 5, Phase 6, and Phase 7 features:
+This repository includes the following Phase 5, Phase 6, Phase 7, and Phase 8 features:
 
 - GitHub OAuth authentication with the minimum required profile scope
 - authenticated monitor CRUD and check history
@@ -41,6 +41,20 @@ This repository now also includes Phase 7 uptime and latency analytics:
 	- `30d`: 6-hour buckets
 - dashboard analytics cards and monitor-level charts for uptime and average latency
 
+This repository now also includes Phase 8 maintenance windows:
+
+- authenticated maintenance window CRUD (`/maintenance-windows`)
+- ownership-scoped monitor associations for maintenance windows
+- derived maintenance state (`SCHEDULED`, `ACTIVE`, `ENDED`, `DISABLED`)
+- maintenance-aware monitor overlays on authenticated dashboards
+- maintenance suppression in automatic outage transitions:
+	- checks continue and `CheckResult` rows are still persisted
+	- failed checks during active maintenance do not increment outage streaks
+	- failed checks during active maintenance do not open automatic incidents
+	- failed checks during active maintenance do not create `INCIDENT_OPENED` deliveries
+	- successful checks can still recover DOWN monitors and resolve pre-existing incidents
+- public status pages now expose `MAINTENANCE` monitor/page states and active maintenance details for affected services
+
 Uptime percentage is calculated from recorded monitoring checks and is not an SLA guarantee.
 
 ## Current scope
@@ -62,7 +76,7 @@ The following capabilities remain intentionally out of scope for this phase:
 - SLA reporting
 - custom domains
 - custom CSS/themes
-- maintenance windows
+- recurring maintenance schedules
 - manual incidents
 - subscriber email/SMS notifications
 - public historical uptime analytics
@@ -193,6 +207,14 @@ The current implementation includes authenticated monitoring, queue-backed sched
 - successful check -> monitor UP -> incident resolves
 - disabled DOWN monitor -> incident remains open until a successful check after monitoring resumes
 
+Maintenance behavior follows these rules:
+
+- monitoring checks continue during maintenance windows
+- check failures during active maintenance are recorded but do not push monitor lifecycle into new outages
+- failure streak remains reset during maintenance suppression
+- pre-existing incidents can still resolve on successful checks during maintenance
+- maintenance acts as a status overlay; monitor `currentStatus` is not replaced with a persisted maintenance state
+
 The notification flow follows an outbox model:
 
 - incident transitions create delivery rows in a transaction
@@ -218,7 +240,8 @@ Phase 7 analytics use fixed bounded ranges (`24h`, `7d`, `30d`) and UTC timestam
 - unresolved incidents contribute downtime through the request `to` timestamp
 - overlapping incident intervals are merged for downtime duration aggregation to avoid double counting
 - `totalDowntimeMs` uses merged overlaps, while `longestDowntimeMs` represents the longest individual incident overlap within the window
-- public status pages remain unchanged and do not expose analytics history in this phase
+- public historical analytics remain out of scope and are not exposed in this phase
+- analytics are intentionally check-based in this phase and are not maintenance-adjusted or SLA-adjusted metrics
 
 Analytics currently query raw `CheckResult` and `Incident` records with bounded aggregation. Future retention/rollups can replace raw-history query paths while preserving API contracts.
 
@@ -226,6 +249,6 @@ Analytics currently query raw `CheckResult` and `Incident` records with bounded 
 
 - retention/rollups for long-term analytics efficiency
 - public historical uptime views
-- maintenance windows
+- recurring maintenance schedules
 - custom domains
 - multi-region monitoring

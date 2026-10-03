@@ -2,8 +2,8 @@
 
 import { use, useEffect, useMemo, useState } from "react";
 
-type PublicMonitorStatus = "OPERATIONAL" | "OUTAGE" | "UNKNOWN";
-type PublicPageStatus = "OPERATIONAL" | "DEGRADED" | "OUTAGE" | "UNKNOWN";
+type PublicMonitorStatus = "OPERATIONAL" | "OUTAGE" | "MAINTENANCE" | "UNKNOWN";
+type PublicPageStatus = "OPERATIONAL" | "OUTAGE" | "MAINTENANCE" | "UNKNOWN";
 
 type PublicStatusPageResponse = {
   page: {
@@ -30,6 +30,13 @@ type PublicStatusPageResponse = {
     reason: string | null;
     durationMs: number;
   }>;
+  activeMaintenance: Array<{
+    title: string;
+    description: string | null;
+    startsAt: string;
+    endsAt: string;
+    monitors: string[];
+  }>;
 };
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -51,9 +58,9 @@ const statusCopy: Record<PublicPageStatus, { label: string; bannerClass: string 
     label: "All systems operational",
     bannerClass: "border-emerald-500/30 bg-emerald-500/10 text-emerald-200",
   },
-  DEGRADED: {
-    label: "Service degraded",
-    bannerClass: "border-amber-500/30 bg-amber-500/10 text-amber-200",
+  MAINTENANCE: {
+    label: "Scheduled maintenance",
+    bannerClass: "border-blue-500/30 bg-blue-500/10 text-blue-200",
   },
   OUTAGE: {
     label: "Service outage",
@@ -73,6 +80,10 @@ const monitorCopy: Record<PublicMonitorStatus, { label: string; className: strin
   OUTAGE: {
     label: "Outage",
     className: "border-red-500/30 bg-red-500/10 text-red-200",
+  },
+  MAINTENANCE: {
+    label: "Maintenance",
+    className: "border-blue-500/30 bg-blue-500/10 text-blue-200",
   },
   UNKNOWN: {
     label: "Unknown",
@@ -245,6 +256,33 @@ export default function PublicStatusPage({ params }: { params: Promise<{ slug: s
             </article>
           )}
         </section>
+
+        {page?.activeMaintenance.length ? (
+          <section className="mt-8 rounded-2xl border border-zinc-800 bg-[#101317] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+            <h2 className="text-lg font-medium text-white">Active maintenance</h2>
+            <div className="mt-4 space-y-3">
+              {page.activeMaintenance.map((maintenance) => (
+                <div key={`${maintenance.title}-${maintenance.startsAt}`} className="rounded-xl border border-blue-500/20 bg-blue-500/5 p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-medium text-blue-100">{maintenance.title}</div>
+                      <div className="mt-1 text-xs text-blue-200/80">
+                        {formatDateTime(maintenance.startsAt)} to {formatDateTime(maintenance.endsAt)}
+                      </div>
+                    </div>
+                    <span className="rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-1 text-[10px] font-medium uppercase tracking-[0.2em] text-blue-200">
+                      Scheduled maintenance
+                    </span>
+                  </div>
+                  {maintenance.description ? <div className="mt-2 text-sm text-blue-100/90">{maintenance.description}</div> : null}
+                  <div className="mt-2 text-xs text-blue-100/80">
+                    Affected services: {maintenance.monitors.length > 0 ? maintenance.monitors.join(", ") : "None"}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        ) : null}
 
         <section className="mt-8 grid gap-4 lg:grid-cols-2">
           <article className="rounded-2xl border border-zinc-800 bg-[#101317] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">

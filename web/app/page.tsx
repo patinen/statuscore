@@ -33,6 +33,12 @@ type Monitor = {
   latestStatusCode: number | null;
   latestResponseTimeMs: number | null;
   latestSuccess: boolean | null;
+  activeMaintenance: {
+    id: string;
+    title: string;
+    startsAt: string;
+    endsAt: string;
+  } | null;
   activeIncident: MonitorIncident | null;
 };
 
@@ -123,6 +129,25 @@ type StatusPage = {
   updatedAt: string;
 };
 
+type MaintenanceWindowState = "SCHEDULED" | "ACTIVE" | "ENDED" | "DISABLED";
+
+type MaintenanceWindow = {
+  id: string;
+  title: string;
+  description: string | null;
+  startsAt: string;
+  endsAt: string;
+  enabled: boolean;
+  state: MaintenanceWindowState;
+  monitorIds: string[];
+  monitors: Array<{
+    monitorId: string;
+    name: string;
+  }>;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type NotificationChannelForm = {
   name: string;
   type: "DISCORD" | "WEBHOOK";
@@ -135,6 +160,15 @@ type StatusPageForm = {
   name: string;
   slug: string;
   description: string;
+  enabled: boolean;
+  monitorIds: string[];
+};
+
+type MaintenanceWindowForm = {
+  title: string;
+  description: string;
+  startsAtLocal: string;
+  endsAtLocal: string;
   enabled: boolean;
   monitorIds: string[];
 };
@@ -211,6 +245,15 @@ const defaultStatusPageForm: StatusPageForm = {
   monitorIds: [],
 };
 
+const defaultMaintenanceForm: MaintenanceWindowForm = {
+  title: "",
+  description: "",
+  startsAtLocal: "",
+  endsAtLocal: "",
+  enabled: true,
+  monitorIds: [],
+};
+
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
 const analyticsRanges: AnalyticsRange[] = ["24h", "7d", "30d"];
@@ -272,13 +315,30 @@ const formatDuration = (durationMs: number) => {
 const formatPercentage = (value: number | null) => (value === null ? "—" : `${value.toFixed(2)}%`);
 const formatLatency = (value: number | null) => (value === null ? "—" : `${value.toFixed(1)} ms`);
 
+const toLocalDateTimeInput = (iso: string) => {
+  const date = new Date(iso);
+  const offset = date.getTimezoneOffset();
+  const local = new Date(date.getTime() - offset * 60_000);
+  return local.toISOString().slice(0, 16);
+};
+
+const localInputToIsoUtc = (value: string) => {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return parsed.toISOString();
+};
+
 export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [monitors, setMonitors] = useState<Monitor[]>([]);
   const [incidents, setIncidents] = useState<IncidentRecord[]>([]);
-    const [notifications, setNotifications] = useState<NotificationDeliveryRecord[]>([]);
-    const [notificationChannels, setNotificationChannels] = useState<NotificationChannel[]>([]);
-    const [statusPages, setStatusPages] = useState<StatusPage[]>([]);
+  const [notifications, setNotifications] = useState<NotificationDeliveryRecord[]>([]);
+  const [notificationChannels, setNotificationChannels] = useState<NotificationChannel[]>([]);
+  const [statusPages, setStatusPages] = useState<StatusPage[]>([]);
+  const [maintenanceWindows, setMaintenanceWindows] = useState<MaintenanceWindow[]>([]);
   const [incidentFilter, setIncidentFilter] = useState<IncidentStatus>("all");
   const [notificationFilter, setNotificationFilter] = useState<NotificationDeliveryStatus>("all");
   const [recentChecks, setRecentChecks] = useState<Record<string, MonitorCheckHistoryItem[]>>({});
@@ -287,6 +347,9 @@ export default function Home() {
   const [statusPageForm, setStatusPageForm] = useState<StatusPageForm>(defaultStatusPageForm);
   const [editingStatusPageId, setEditingStatusPageId] = useState<string | null>(null);
   const [editingStatusPageDescription, setEditingStatusPageDescription] = useState<string | null>(null);
+  const [maintenanceForm, setMaintenanceForm] = useState<MaintenanceWindowForm>(defaultMaintenanceForm);
+  const [editingMaintenanceWindowId, setEditingMaintenanceWindowId] = useState<string | null>(null);
+  const [editingMaintenanceDescription, setEditingMaintenanceDescription] = useState<string | null>(null);
   const [isLoadingChecks, setIsLoadingChecks] = useState<Record<string, boolean>>({});
   const [expandedMonitorId, setExpandedMonitorId] = useState<string | null>(null);
   const [analyticsRange, setAnalyticsRange] = useState<AnalyticsRange>("24h");
@@ -325,10 +388,11 @@ export default function Home() {
         }
 
         setUser(currentUser);
-        const [list, channels, pages] = await Promise.all([
+        const [list, channels, pages, maintenance] = await Promise.all([
           apiRequest<Monitor[]>('/monitors'),
           apiRequest<NotificationChannel[]>('/notification-channels'),
           apiRequest<StatusPage[]>('/status-pages'),
+          apiRequest<MaintenanceWindow[]>('/maintenance-windows'),
         ]);
         if (!isActive) {
           return;
@@ -337,6 +401,7 @@ export default function Home() {
         setMonitors(list ?? []);
         setNotificationChannels(channels ?? []);
         setStatusPages(pages ?? []);
+        setMaintenanceWindows(maintenance ?? []);
         setError(null);
       } catch {
         if (!isActive) {
@@ -345,6 +410,7 @@ export default function Home() {
 
         setUser(null);
         setMonitors([]);
+        setMaintenanceWindows([]);
         setSelectedMonitorId(null);
         setMonitorAnalytics(null);
         setAnalyticsOverview(null);
@@ -372,11 +438,12 @@ export default function Home() {
 
     const loadDashboard = async () => {
       try {
-        const [list, incidentList, notificationList, pageList] = await Promise.all([
+        const [list, incidentList, notificationList, pageList, maintenanceList] = await Promise.all([
           apiRequest<Monitor[]>('/monitors'),
           apiRequest<IncidentRecord[]>(`/incidents?status=${incidentFilter}&limit=50`),
           apiRequest<NotificationDeliveryRecord[]>(`/notification-deliveries?status=${notificationFilter}&limit=10`),
           apiRequest<StatusPage[]>('/status-pages'),
+          apiRequest<MaintenanceWindow[]>('/maintenance-windows'),
         ]);
 
         if (!cancelled) {
@@ -384,6 +451,7 @@ export default function Home() {
           setIncidents(incidentList ?? []);
           setNotifications(notificationList ?? []);
           setStatusPages(pageList ?? []);
+          setMaintenanceWindows(maintenanceList ?? []);
           setError(null);
         }
       } catch (pollError) {
@@ -468,6 +536,12 @@ export default function Home() {
     setEditingStatusPageDescription(null);
   };
 
+  const resetMaintenanceForm = () => {
+    setMaintenanceForm(defaultMaintenanceForm);
+    setEditingMaintenanceWindowId(null);
+    setEditingMaintenanceDescription(null);
+  };
+
   const updateForm = <K extends keyof MonitorForm>(key: K, value: MonitorForm[K]) => {
     setForm((currentForm) => ({ ...currentForm, [key]: value }));
   };
@@ -485,6 +559,7 @@ export default function Home() {
       setNotifications([]);
       setNotificationChannels([]);
       setStatusPages([]);
+      setMaintenanceWindows([]);
       setAnalyticsOverview(null);
       setMonitorAnalytics(null);
       setAnalyticsError(null);
@@ -492,6 +567,7 @@ export default function Home() {
       resetForm();
       resetChannelForm();
       resetStatusPageForm();
+      resetMaintenanceForm();
     } catch (logoutError) {
       setError(logoutError instanceof Error ? logoutError.message : "Unable to log out.");
     }
@@ -505,6 +581,11 @@ export default function Home() {
   const loadStatusPages = async () => {
     const pages = await apiRequest<StatusPage[]>('/status-pages');
     setStatusPages(pages ?? []);
+  };
+
+  const loadMaintenanceWindows = async () => {
+    const windows = await apiRequest<MaintenanceWindow[]>('/maintenance-windows');
+    setMaintenanceWindows(windows ?? []);
   };
 
   const toggleChannelMonitor = (monitorId: string) => {
@@ -547,6 +628,29 @@ export default function Home() {
       description: statusPage.description ?? '',
       enabled: statusPage.enabled,
       monitorIds: statusPage.monitorIds,
+    });
+  };
+
+  const toggleMaintenanceMonitor = (monitorId: string) => {
+    setMaintenanceForm((current) => {
+      const nextMonitorIds = current.monitorIds.includes(monitorId)
+        ? current.monitorIds.filter((value) => value !== monitorId)
+        : [...current.monitorIds, monitorId];
+
+      return { ...current, monitorIds: nextMonitorIds };
+    });
+  };
+
+  const beginEditMaintenanceWindow = (window: MaintenanceWindow) => {
+    setEditingMaintenanceWindowId(window.id);
+    setEditingMaintenanceDescription(window.description);
+    setMaintenanceForm({
+      title: window.title,
+      description: window.description ?? "",
+      startsAtLocal: toLocalDateTimeInput(window.startsAt),
+      endsAtLocal: toLocalDateTimeInput(window.endsAt),
+      enabled: window.enabled,
+      monitorIds: window.monitorIds,
     });
   };
 
@@ -659,6 +763,98 @@ export default function Home() {
       resetStatusPageForm();
     } catch (statusPageError) {
       setError(statusPageError instanceof Error ? statusPageError.message : 'Unable to save status page.');
+    }
+  };
+
+  const handleMaintenanceSubmit = async () => {
+    const title = maintenanceForm.title.trim();
+    const description = maintenanceForm.description.trim();
+    const startsAt = localInputToIsoUtc(maintenanceForm.startsAtLocal);
+    const endsAt = localInputToIsoUtc(maintenanceForm.endsAtLocal);
+
+    if (!title) {
+      setError('Maintenance title is required.');
+      return;
+    }
+
+    if (!startsAt || !endsAt) {
+      setError('Start and end timestamps are required.');
+      return;
+    }
+
+    if (maintenanceForm.monitorIds.length === 0) {
+      setError('Select at least one monitor for maintenance.');
+      return;
+    }
+
+    try {
+      setError(null);
+
+      const payload = editingMaintenanceWindowId
+        ? {
+            title,
+            startsAt,
+            endsAt,
+            enabled: maintenanceForm.enabled,
+            monitorIds: maintenanceForm.monitorIds,
+            ...(description !== (editingMaintenanceDescription ?? '')
+              ? { description: description.length > 0 ? description : null }
+              : {}),
+          }
+        : {
+            title,
+            startsAt,
+            endsAt,
+            monitorIds: maintenanceForm.monitorIds,
+            ...(description.length > 0 ? { description } : {}),
+          };
+
+      if (editingMaintenanceWindowId) {
+        await apiRequest<MaintenanceWindow>(`/maintenance-windows/${editingMaintenanceWindowId}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        });
+      } else {
+        await apiRequest<MaintenanceWindow>('/maintenance-windows', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+      }
+
+      await loadMaintenanceWindows();
+      resetMaintenanceForm();
+    } catch (maintenanceError) {
+      setError(maintenanceError instanceof Error ? maintenanceError.message : 'Unable to save maintenance window.');
+    }
+  };
+
+  const handleToggleMaintenanceWindow = async (window: MaintenanceWindow) => {
+    try {
+      const updated = await apiRequest<MaintenanceWindow>(`/maintenance-windows/${window.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: !window.enabled }),
+      });
+
+      setMaintenanceWindows((current) => current.map((item) => (item.id === window.id ? updated : item)));
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : 'Unable to update maintenance window.');
+    }
+  };
+
+  const handleDeleteMaintenanceWindow = async (maintenanceWindow: MaintenanceWindow) => {
+    if (!window.confirm(`Delete maintenance window \"${maintenanceWindow.title}\"?`)) {
+      return;
+    }
+
+    try {
+      setError(null);
+      await apiRequest<void>(`/maintenance-windows/${maintenanceWindow.id}`, { method: 'DELETE' });
+      setMaintenanceWindows((current) => current.filter((item) => item.id !== maintenanceWindow.id));
+      if (editingMaintenanceWindowId === maintenanceWindow.id) {
+        resetMaintenanceForm();
+      }
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Unable to delete maintenance window.');
     }
   };
 
@@ -1183,6 +1379,186 @@ export default function Home() {
                 <div className="space-y-6">
                   <div className="rounded-lg border border-zinc-700 bg-zinc-950/40 p-5">
                     <div className="mb-4 flex items-center justify-between gap-3">
+                      <div>
+                        <h2 className="text-xl font-medium text-zinc-50">Maintenance windows</h2>
+                        <p className="mt-1 text-xs text-zinc-400">Checks continue during maintenance, but maintenance failures do not open automatic incidents.</p>
+                      </div>
+                      {editingMaintenanceWindowId ? (
+                        <button
+                          type="button"
+                          onClick={resetMaintenanceForm}
+                          className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200"
+                        >
+                          Cancel edit
+                        </button>
+                      ) : null}
+                    </div>
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <label className="block text-sm text-zinc-300 md:col-span-1">
+                        Title
+                        <input
+                          value={maintenanceForm.title}
+                          onChange={(event) => setMaintenanceForm((current) => ({ ...current, title: event.target.value }))}
+                          className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                          placeholder="Database upgrade"
+                        />
+                      </label>
+
+                      <label className="block text-sm text-zinc-300 md:col-span-1">
+                        Start (local)
+                        <input
+                          type="datetime-local"
+                          value={maintenanceForm.startsAtLocal}
+                          onChange={(event) => setMaintenanceForm((current) => ({ ...current, startsAtLocal: event.target.value }))}
+                          className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                        />
+                      </label>
+
+                      <label className="block text-sm text-zinc-300 md:col-span-1">
+                        End (local)
+                        <input
+                          type="datetime-local"
+                          value={maintenanceForm.endsAtLocal}
+                          onChange={(event) => setMaintenanceForm((current) => ({ ...current, endsAtLocal: event.target.value }))}
+                          className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                        />
+                      </label>
+
+                      <label className="block text-sm text-zinc-300 md:col-span-2">
+                        Description
+                        <textarea
+                          value={maintenanceForm.description}
+                          onChange={(event) => setMaintenanceForm((current) => ({ ...current, description: event.target.value }))}
+                          className="mt-2 min-h-20 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                          placeholder="Optional maintenance details"
+                        />
+                      </label>
+
+                      {editingMaintenanceWindowId ? (
+                        <label className="flex items-center justify-between rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-3 text-sm text-zinc-300 md:col-span-2">
+                          Enabled
+                          <input
+                            type="checkbox"
+                            checked={maintenanceForm.enabled}
+                            onChange={(event) => setMaintenanceForm((current) => ({ ...current, enabled: event.target.checked }))}
+                            className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-emerald-400"
+                          />
+                        </label>
+                      ) : (
+                        <div className="rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-3 text-sm text-zinc-400 md:col-span-2">
+                          New windows start enabled.
+                        </div>
+                      )}
+
+                      <div className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900/60 p-3">
+                        <div className="mb-2 text-sm font-medium text-zinc-200">Affected monitors</div>
+                        {monitors.length === 0 ? (
+                          <div className="text-sm text-zinc-400">No monitors available yet.</div>
+                        ) : (
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            {monitors.map((monitor) => (
+                              <label key={monitor.id} className="flex items-center gap-2 rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-sm text-zinc-200">
+                                <input
+                                  type="checkbox"
+                                  checked={maintenanceForm.monitorIds.includes(monitor.id)}
+                                  onChange={() => toggleMaintenanceMonitor(monitor.id)}
+                                  className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-emerald-400"
+                                />
+                                {monitor.name}
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-5 flex gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void handleMaintenanceSubmit()}
+                        className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-slate-950"
+                      >
+                        {editingMaintenanceWindowId ? 'Save maintenance window' : 'Add maintenance window'}
+                      </button>
+                      {editingMaintenanceWindowId ? (
+                        <button
+                          type="button"
+                          onClick={resetMaintenanceForm}
+                          className="rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-200"
+                        >
+                          Reset
+                        </button>
+                      ) : null}
+                    </div>
+
+                    {maintenanceWindows.length > 0 ? (
+                      <div className="mt-6 space-y-3">
+                        {maintenanceWindows.map((maintenanceWindow) => {
+                          const stateClass =
+                            maintenanceWindow.state === 'ACTIVE'
+                              ? 'border-blue-500/30 bg-blue-500/10 text-blue-200'
+                              : maintenanceWindow.state === 'SCHEDULED'
+                                ? 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+                                : maintenanceWindow.state === 'ENDED'
+                                  ? 'border-zinc-600/30 bg-zinc-700/10 text-zinc-300'
+                                  : 'border-zinc-500/30 bg-zinc-500/10 text-zinc-200';
+
+                          return (
+                            <div key={maintenanceWindow.id} className="rounded-md border border-zinc-700 bg-zinc-950/70 p-3">
+                              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                <div>
+                                  <div className="flex items-center gap-2">
+                                    <div className="text-sm font-medium text-zinc-100">{maintenanceWindow.title}</div>
+                                    <span className={[
+                                      'rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.2em]',
+                                      stateClass,
+                                    ].join(' ')}>
+                                      {maintenanceWindow.state}
+                                    </span>
+                                  </div>
+                                  <div className="mt-1 text-xs text-zinc-400">
+                                    {new Date(maintenanceWindow.startsAt).toLocaleString()} to {new Date(maintenanceWindow.endsAt).toLocaleString()}
+                                  </div>
+                                  {maintenanceWindow.description ? <div className="mt-2 text-xs text-zinc-300">{maintenanceWindow.description}</div> : null}
+                                  <div className="mt-2 text-xs text-zinc-400">
+                                    Monitors: {maintenanceWindow.monitors.length > 0 ? maintenanceWindow.monitors.map((monitor) => monitor.name).join(', ') : 'None'}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => void handleToggleMaintenanceWindow(maintenanceWindow)}
+                                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-100"
+                                >
+                                  {maintenanceWindow.enabled ? 'Disable' : 'Enable'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => beginEditMaintenanceWindow(maintenanceWindow)}
+                                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-100"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDeleteMaintenanceWindow(maintenanceWindow)}
+                                  className="rounded-md border border-red-700 bg-red-950/30 px-3 py-2 text-xs text-red-200"
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="rounded-lg border border-zinc-700 bg-zinc-950/40 p-5">
+                    <div className="mb-4 flex items-center justify-between gap-3">
                       <h2 className="text-xl font-medium text-zinc-50">Recent notifications</h2>
                       <div className="flex items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900 p-1">
                         {(['all', 'pending', 'sent', 'failed'] as NotificationDeliveryStatus[]).map((status) => (
@@ -1688,6 +2064,23 @@ export default function Home() {
                               {monitor.activeIncident.lastError ? (
                                 <div className="mt-1 text-xs text-red-200">Last error: {monitor.activeIncident.lastError}</div>
                               ) : null}
+                            </div>
+                          ) : null}
+
+                          {monitor.activeMaintenance ? (
+                            <div className="mt-4 rounded-md border border-blue-700/50 bg-blue-950/20 p-3 text-sm text-blue-100">
+                              <div className="flex items-center justify-between gap-3">
+                                <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-blue-300">
+                                  Maintenance
+                                </span>
+                                <span className="text-[10px] text-blue-200">
+                                  Ends {new Date(monitor.activeMaintenance.endsAt).toLocaleString()}
+                                </span>
+                              </div>
+                              <div className="mt-2 font-medium text-blue-50">{monitor.activeMaintenance.title}</div>
+                              <div className="mt-1 text-xs text-blue-200">
+                                {new Date(monitor.activeMaintenance.startsAt).toLocaleString()} to {new Date(monitor.activeMaintenance.endsAt).toLocaleString()}
+                              </div>
                             </div>
                           ) : null}
 

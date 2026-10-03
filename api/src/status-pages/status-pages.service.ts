@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { MaintenanceWindowsService } from '../maintenance-windows/maintenance-windows.service.js';
 import { PrismaService } from '../database/prisma.service.js';
 import type { CreateStatusPageDto, UpdateStatusPageDto } from './status-pages.dto.js';
 
@@ -49,12 +50,15 @@ type PublicStatusPageRecord = {
   monitorAssociations: PublicStatusPageMonitor[];
 };
 
-type PublicMonitorStatus = 'OPERATIONAL' | 'OUTAGE' | 'UNKNOWN';
-type PublicPageStatus = 'OPERATIONAL' | 'DEGRADED' | 'OUTAGE' | 'UNKNOWN';
+type PublicMonitorStatus = 'OPERATIONAL' | 'OUTAGE' | 'MAINTENANCE' | 'UNKNOWN';
+type PublicPageStatus = 'OPERATIONAL' | 'OUTAGE' | 'MAINTENANCE' | 'UNKNOWN';
 
 @Injectable()
 export class StatusPagesService {
-  constructor(@Inject(PrismaService) private readonly prisma: PrismaService) {}
+  constructor(
+    @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(MaintenanceWindowsService) private readonly maintenanceWindowsService: MaintenanceWindowsService,
+  ) {}
 
   private static normalizePageDescription(description: string | null | undefined): string | null {
     if (description === null) {
@@ -81,7 +85,11 @@ export class StatusPagesService {
     return typeof target === 'string' && target.includes('slug');
   }
 
-  private static monitorStatusForPublic(monitor: { enabled: boolean; currentStatus: string }): PublicMonitorStatus {
+  private static monitorStatusForPublic(monitor: { enabled: boolean; currentStatus: string }, isUnderMaintenance: boolean): PublicMonitorStatus {
+    if (isUnderMaintenance) {
+      return 'MAINTENANCE';
+    }
+
     if (!monitor.enabled) {
       return 'UNKNOWN';
     }
@@ -100,6 +108,10 @@ export class StatusPagesService {
   private static overallStatusForPublic(monitorStatuses: PublicMonitorStatus[]): PublicPageStatus {
     if (monitorStatuses.some((status) => status === 'OUTAGE')) {
       return 'OUTAGE';
+    }
+
+    if (monitorStatuses.some((status) => status === 'MAINTENANCE')) {
+      return 'MAINTENANCE';
     }
 
     if (monitorStatuses.length > 0 && monitorStatuses.every((status) => status === 'OPERATIONAL')) {
@@ -364,7 +376,9 @@ export class StatusPagesService {
     );
     const monitoredIds = currentPage.monitorAssociations.map((association) => association.monitorId);
 
-    const [activeIncidents, recentIncidents] = await Promise.all([
+    const now = new Date();
+
+    const [activeIncidents, recentIncidents, activeMaintenanceWindows] = await Promise.all([
       monitoredIds.length > 0
         ? this.prisma.incident.findMany({
             where: {
@@ -396,12 +410,21 @@ export class StatusPagesService {
             },
           })
         : Promise.resolve([]),
+      this.maintenanceWindowsService.getActivePublicMaintenanceForMonitors(monitoredIds, now),
     ]);
 
+    const monitorIdsUnderMaintenance = new Set(
+      activeMaintenanceWindows.flatMap((window) => window.monitorIds),
+    );
+
     const publicMonitors = currentPage.monitorAssociations.map((association) => {
-      const status = StatusPagesService.monitorStatusForPublic(association.monitor);
+      const status = StatusPagesService.monitorStatusForPublic(
+        association.monitor,
+        monitorIdsUnderMaintenance.has(association.monitorId),
+      );
 
       return {
+        monitorId: association.monitorId,
         name: monitorLabelById.get(association.monitorId) ?? association.monitor.name,
         status,
         lastCheckedAt: association.monitor.lastCheckedAt,
@@ -418,7 +441,16 @@ export class StatusPagesService {
         updatedAt: currentPage.updatedAt,
       },
       overallStatus,
-      monitors: publicMonitors,
+      monitors: publicMonitors.map(({ monitorId: _monitorId, ...monitor }) => monitor),
+      activeMaintenance: activeMaintenanceWindows.map((window) => ({
+        title: window.title,
+        description: window.description,
+        startsAt: window.startsAt,
+        endsAt: window.endsAt,
+        monitors: window.monitorIds
+          .map((monitorId) => monitorLabelById.get(monitorId))
+          .filter((name): name is string => Boolean(name)),
+      })),
       activeIncidents: activeIncidents.map((incident) => ({
         monitorName: monitorLabelById.get(incident.monitorId) ?? 'Monitoring service',
         startedAt: incident.startedAt,
