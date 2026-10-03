@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Inject,
   Param,
   Patch,
   Post,
@@ -21,7 +22,7 @@ import { NotificationsService } from './notifications.service.js';
 @Controller()
 @UseGuards(AuthGuard)
 export class NotificationsController {
-  constructor(private readonly notificationsService: NotificationsService) {}
+  constructor(@Inject(NotificationsService) private readonly notificationsService: NotificationsService) {}
 
   @Get('notification-channels')
   listChannels(@Req() req: Request & { user: SessionUser }) {

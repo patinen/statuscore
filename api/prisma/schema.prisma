@@ -18,6 +18,7 @@ model User {
 
   monitors Monitor[]
   notificationChannels NotificationChannel[]
+  statusPages StatusPage[]
 }
 
 model Monitor {
@@ -42,6 +43,7 @@ model Monitor {
   checkResults          CheckResult[]
   incidents            Incident[]
   notificationChannels MonitorNotificationChannel[]
+  statusPageAssociations StatusPageMonitor[]
 
   @@index([userId])
   @@index([enabled, nextCheckAt])
@@ -118,6 +120,37 @@ model NotificationDelivery {
   @@index([userId, status, nextAttemptAt])
   @@index([channelId])
   @@index([incidentId])
+}
+
+model StatusPage {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @db.Uuid
+  name        String    @db.VarChar(100)
+  slug        String    @unique @db.VarChar(80)
+  description String?   @db.VarChar(500)
+  enabled     Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  user              User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  monitorAssociations StatusPageMonitor[]
+
+  @@index([userId, enabled])
+}
+
+model StatusPageMonitor {
+  statusPageId String   @db.Uuid
+  monitorId    String   @db.Uuid
+  displayName  String?  @db.VarChar(100)
+  position     Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  statusPage StatusPage @relation(fields: [statusPageId], references: [id], onDelete: Cascade)
+  monitor    Monitor    @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+
+  @@id([statusPageId, monitorId])
+  @@index([monitorId])
+  @@index([statusPageId, position])
 }
 
 model CheckResult {

@@ -2,6 +2,7 @@ import {
   Controller,
   DefaultValuePipe,
   Get,
+  Inject,
   Query,
   Req,
   UseGuards,
@@ -26,7 +27,7 @@ class IncidentLimitPipe {
 @Controller('incidents')
 @UseGuards(AuthGuard)
 export class IncidentsController {
-  constructor(private readonly incidentsService: IncidentsService) {}
+  constructor(@Inject(IncidentsService) private readonly incidentsService: IncidentsService) {}
 
   @Get()
   listIncidents(

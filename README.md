@@ -2,9 +2,9 @@
 
 StatusCore is a self-hosted monitoring platform for public services, built around GitHub authentication, monitor management, and safe HTTP checks.
 
-## Phase 5 implemented
+## Phase 6 implemented
 
-This repository includes the following Phase 5 features:
+This repository includes the following Phase 5 and Phase 6 features:
 
 - GitHub OAuth authentication with the minimum required profile scope
 - authenticated monitor CRUD and check history
@@ -20,6 +20,14 @@ This repository includes the following Phase 5 features:
 - recent notification delivery history API and dashboard visibility
 - public HTTPS-only webhook validation and Discord webhook host restrictions
 
+This repository now also includes Phase 6 public status pages:
+
+- authenticated status page CRUD with public slug management
+- public unauthenticated status page API for selected monitors and incident history
+- public status page route under `/status/[slug]`
+- safe public serialization that omits monitor URLs, webhook secrets, user identity, and internal error details
+- monitor ordering and public availability semantics for enabled and disabled monitors
+
 ## Current scope
 
 The project remains focused on the following operational capabilities:
@@ -29,14 +37,20 @@ The project remains focused on the following operational capabilities:
 - status notifications via webhook/Discord channels
 - delivery retry and resilient outbox processing
 - secure outbound networking constraints
+- public read-only status pages for selected monitors
 
 The following capabilities remain intentionally out of scope for this phase:
 
 - uptime/latency analytics
 - charts
-- public status pages
 - SSE/WebSockets
 - retention/rollups
+- SLA reporting
+- custom domains
+- custom CSS/themes
+- maintenance windows
+- manual incidents
+- subscriber email/SMS notifications
 
 ## Current stack
 
@@ -170,3 +184,11 @@ The notification flow follows an outbox model:
 - workers retry transient failure without mutating the core monitor lifecycle
 - endpoint URLs are encrypted at rest and validated against public HTTPS-only targets
 - DNS/IP pinning and blocked-address protections remain enforced for all outbound notification requests
+
+The public status page flow is:
+
+- monitor checks update monitor state and open or resolve incidents
+- authenticated users select monitors on a status page and publish a slug
+- the public API serves only safe page, monitor status, and incident history fields
+- the web status page at `/status/<slug>` polls the public API every 30 seconds
+- public pages intentionally do not expose monitor URLs, webhook URLs, encrypted secrets, user data, or raw check errors

@@ -56,10 +56,35 @@ type NotificationChannel = {
   updatedAt: string;
 };
 
+type StatusPage = {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  enabled: boolean;
+  monitorIds: string[];
+  monitors: Array<{
+    monitorId: string;
+    name: string;
+    displayName: string | null;
+    position: number;
+  }>;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type NotificationChannelForm = {
   name: string;
   type: "DISCORD" | "WEBHOOK";
   url: string;
+  enabled: boolean;
+  monitorIds: string[];
+};
+
+type StatusPageForm = {
+  name: string;
+  slug: string;
+  description: string;
   enabled: boolean;
   monitorIds: string[];
 };
@@ -128,6 +153,14 @@ const defaultChannelForm: NotificationChannelForm = {
   monitorIds: [],
 };
 
+const defaultStatusPageForm: StatusPageForm = {
+  name: "",
+  slug: "",
+  description: "",
+  enabled: true,
+  monitorIds: [],
+};
+
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
 
 async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -188,13 +221,16 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [monitors, setMonitors] = useState<Monitor[]>([]);
   const [incidents, setIncidents] = useState<IncidentRecord[]>([]);
-  const [notifications, setNotifications] = useState<NotificationDeliveryRecord[]>([]);
-  const [notificationChannels, setNotificationChannels] = useState<NotificationChannel[]>([]);
+    const [notifications, setNotifications] = useState<NotificationDeliveryRecord[]>([]);
+    const [notificationChannels, setNotificationChannels] = useState<NotificationChannel[]>([]);
+    const [statusPages, setStatusPages] = useState<StatusPage[]>([]);
   const [incidentFilter, setIncidentFilter] = useState<IncidentStatus>("all");
   const [notificationFilter, setNotificationFilter] = useState<NotificationDeliveryStatus>("all");
   const [recentChecks, setRecentChecks] = useState<Record<string, MonitorCheckHistoryItem[]>>({});
   const [channelForm, setChannelForm] = useState<NotificationChannelForm>(defaultChannelForm);
   const [editingChannelId, setEditingChannelId] = useState<string | null>(null);
+  const [statusPageForm, setStatusPageForm] = useState<StatusPageForm>(defaultStatusPageForm);
+  const [editingStatusPageId, setEditingStatusPageId] = useState<string | null>(null);
   const [isLoadingChecks, setIsLoadingChecks] = useState<Record<string, boolean>>({});
   const [expandedMonitorId, setExpandedMonitorId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -216,9 +252,10 @@ export default function Home() {
         }
 
         setUser(currentUser);
-        const [list, channels] = await Promise.all([
-          apiRequest<Monitor[]>("/monitors"),
-          apiRequest<NotificationChannel[]>("/notification-channels"),
+        const [list, channels, pages] = await Promise.all([
+          apiRequest<Monitor[]>('/monitors'),
+          apiRequest<NotificationChannel[]>('/notification-channels'),
+          apiRequest<StatusPage[]>('/status-pages'),
         ]);
         if (!isActive) {
           return;
@@ -226,6 +263,7 @@ export default function Home() {
 
         setMonitors(list ?? []);
         setNotificationChannels(channels ?? []);
+        setStatusPages(pages ?? []);
         setError(null);
       } catch {
         if (!isActive) {
@@ -257,16 +295,18 @@ export default function Home() {
 
     const loadDashboard = async () => {
       try {
-        const [list, incidentList, notificationList] = await Promise.all([
+        const [list, incidentList, notificationList, pageList] = await Promise.all([
           apiRequest<Monitor[]>('/monitors'),
           apiRequest<IncidentRecord[]>(`/incidents?status=${incidentFilter}&limit=50`),
           apiRequest<NotificationDeliveryRecord[]>(`/notification-deliveries?status=${notificationFilter}&limit=10`),
+          apiRequest<StatusPage[]>('/status-pages'),
         ]);
 
         if (!cancelled) {
           setMonitors(list ?? []);
           setIncidents(incidentList ?? []);
           setNotifications(notificationList ?? []);
+          setStatusPages(pageList ?? []);
           setError(null);
         }
       } catch (pollError) {
@@ -297,6 +337,11 @@ export default function Home() {
     setEditingChannelId(null);
   };
 
+  const resetStatusPageForm = () => {
+    setStatusPageForm(defaultStatusPageForm);
+    setEditingStatusPageId(null);
+  };
+
   const updateForm = <K extends keyof MonitorForm>(key: K, value: MonitorForm[K]) => {
     setForm((currentForm) => ({ ...currentForm, [key]: value }));
   };
@@ -313,8 +358,10 @@ export default function Home() {
       setIncidents([]);
       setNotifications([]);
       setNotificationChannels([]);
+      setStatusPages([]);
       resetForm();
       resetChannelForm();
+      resetStatusPageForm();
     } catch (logoutError) {
       setError(logoutError instanceof Error ? logoutError.message : "Unable to log out.");
     }
@@ -323,6 +370,11 @@ export default function Home() {
   const loadNotificationChannels = async () => {
     const channels = await apiRequest<NotificationChannel[]>("/notification-channels");
     setNotificationChannels(channels ?? []);
+  };
+
+  const loadStatusPages = async () => {
+    const pages = await apiRequest<StatusPage[]>('/status-pages');
+    setStatusPages(pages ?? []);
   };
 
   const toggleChannelMonitor = (monitorId: string) => {
@@ -343,6 +395,27 @@ export default function Home() {
       url: "",
       enabled: channel.enabled,
       monitorIds: channel.monitorIds,
+    });
+  };
+
+  const toggleStatusPageMonitor = (monitorId: string) => {
+    setStatusPageForm((current) => {
+      const nextMonitorIds = current.monitorIds.includes(monitorId)
+        ? current.monitorIds.filter((value) => value !== monitorId)
+        : [...current.monitorIds, monitorId];
+
+      return { ...current, monitorIds: nextMonitorIds };
+    });
+  };
+
+  const beginEditStatusPage = (statusPage: StatusPage) => {
+    setEditingStatusPageId(statusPage.id);
+    setStatusPageForm({
+      name: statusPage.name,
+      slug: statusPage.slug,
+      description: statusPage.description ?? '',
+      enabled: statusPage.enabled,
+      monitorIds: statusPage.monitorIds,
     });
   };
 
@@ -397,6 +470,92 @@ export default function Home() {
       resetChannelForm();
     } catch (channelError) {
       setError(channelError instanceof Error ? channelError.message : "Unable to save notification channel.");
+    }
+  };
+
+  const handleStatusPageSubmit = async () => {
+    const name = statusPageForm.name.trim();
+    const slug = statusPageForm.slug.trim();
+    const description = statusPageForm.description.trim();
+
+    if (!name) {
+      setError('Status page name is required.');
+      return;
+    }
+
+    if (!slug) {
+      setError('Status page slug is required.');
+      return;
+    }
+
+    if (statusPageForm.monitorIds.length > 25) {
+      setError('Maximum of 25 monitors per status page.');
+      return;
+    }
+
+    try {
+      setError(null);
+      const payload = editingStatusPageId
+        ? {
+            name,
+            slug,
+            description: description || undefined,
+            enabled: statusPageForm.enabled,
+            monitorIds: statusPageForm.monitorIds,
+          }
+        : {
+            name,
+            slug,
+            description: description || undefined,
+            monitorIds: statusPageForm.monitorIds,
+          };
+
+      if (editingStatusPageId) {
+        await apiRequest<void>(`/status-pages/${editingStatusPageId}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        });
+      } else {
+        await apiRequest<void>('/status-pages', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+      }
+
+      await loadStatusPages();
+      resetStatusPageForm();
+    } catch (statusPageError) {
+      setError(statusPageError instanceof Error ? statusPageError.message : 'Unable to save status page.');
+    }
+  };
+
+  const handleToggleStatusPage = async (statusPage: StatusPage) => {
+    try {
+      const updated = await apiRequest<StatusPage>(`/status-pages/${statusPage.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: !statusPage.enabled }),
+      });
+
+      setStatusPages((current) => current.map((item) => (item.id === statusPage.id ? updated : item)));
+    } catch (toggleError) {
+      setError(toggleError instanceof Error ? toggleError.message : 'Unable to update status page.');
+    }
+  };
+
+  const handleDeleteStatusPage = async (statusPage: StatusPage) => {
+    if (!window.confirm(`Delete the status page "${statusPage.name}"?`)) {
+      return;
+    }
+
+    try {
+      setError(null);
+      await apiRequest<void>(`/status-pages/${statusPage.id}`, { method: 'DELETE' });
+      setStatusPages((current) => current.filter((item) => item.id !== statusPage.id));
+      if (editingStatusPageId === statusPage.id) {
+        resetStatusPageForm();
+      }
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Unable to delete status page.');
     }
   };
 
@@ -966,6 +1125,179 @@ export default function Home() {
                                 <button
                                   type="button"
                                   onClick={() => void handleDeleteChannel(channel)}
+                                  className="rounded-md border border-red-700 bg-red-950/30 px-3 py-2 text-xs text-red-200"
+                                >
+                                  Delete
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="rounded-lg border border-zinc-700 bg-zinc-950/40 p-5">
+                    <div className="mb-4 flex items-center justify-between gap-3">
+                      <div>
+                        <h2 className="text-xl font-medium text-zinc-50">Status pages</h2>
+                        <p className="mt-1 text-xs text-zinc-400">Public pages live at /status/&lt;slug&gt;. Slugs update immediately when edited.</p>
+                      </div>
+                      {editingStatusPageId ? (
+                        <button
+                          type="button"
+                          onClick={resetStatusPageForm}
+                          className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-200"
+                        >
+                          Cancel edit
+                        </button>
+                      ) : null}
+                    </div>
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <label className="block text-sm text-zinc-300 md:col-span-1">
+                        Page name
+                        <input
+                          value={statusPageForm.name}
+                          onChange={(event) => setStatusPageForm((current) => ({ ...current, name: event.target.value }))}
+                          className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                          placeholder="My Services"
+                        />
+                      </label>
+
+                      <label className="block text-sm text-zinc-300 md:col-span-1">
+                        Slug
+                        <input
+                          value={statusPageForm.slug}
+                          onChange={(event) => setStatusPageForm((current) => ({ ...current, slug: event.target.value }))}
+                          className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                          placeholder="my-services"
+                        />
+                        <div className="mt-1 text-xs text-zinc-500">
+                          Lowercase letters, numbers, and hyphens only. Changing this updates the public URL immediately.
+                        </div>
+                      </label>
+
+                      <label className="block text-sm text-zinc-300 md:col-span-2">
+                        Description
+                        <textarea
+                          value={statusPageForm.description}
+                          onChange={(event) => setStatusPageForm((current) => ({ ...current, description: event.target.value }))}
+                          className="mt-2 min-h-24 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                          placeholder="A short public summary for your services"
+                        />
+                      </label>
+
+                      {editingStatusPageId ? (
+                        <label className="flex items-center justify-between rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-3 text-sm text-zinc-300 md:col-span-2">
+                          Enabled
+                          <input
+                            type="checkbox"
+                            checked={statusPageForm.enabled}
+                            onChange={(event) => setStatusPageForm((current) => ({ ...current, enabled: event.target.checked }))}
+                            className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-emerald-400"
+                          />
+                        </label>
+                      ) : (
+                        <div className="rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-3 text-sm text-zinc-400 md:col-span-2">
+                          New status pages start enabled.
+                        </div>
+                      )}
+
+                      <div className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900/60 p-3">
+                        <div className="mb-2 text-sm font-medium text-zinc-200">Linked monitors</div>
+                        {monitors.length === 0 ? (
+                          <div className="text-sm text-zinc-400">No monitors available yet.</div>
+                        ) : (
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            {monitors.map((monitor) => (
+                              <label key={monitor.id} className="flex items-center gap-2 rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-sm text-zinc-200">
+                                <input
+                                  type="checkbox"
+                                  checked={statusPageForm.monitorIds.includes(monitor.id)}
+                                  onChange={() => toggleStatusPageMonitor(monitor.id)}
+                                  className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-emerald-400"
+                                />
+                                {monitor.name}
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-5 flex gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void handleStatusPageSubmit()}
+                        className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-slate-950"
+                      >
+                        {editingStatusPageId ? 'Save status page' : 'Add status page'}
+                      </button>
+                      {editingStatusPageId ? (
+                        <button
+                          type="button"
+                          onClick={resetStatusPageForm}
+                          className="rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-200"
+                        >
+                          Reset
+                        </button>
+                      ) : null}
+                    </div>
+
+                    {statusPages.length > 0 ? (
+                      <div className="mt-6 space-y-3">
+                        {statusPages.map((statusPage) => {
+                          const monitorNames = statusPage.monitors.map((monitor) => monitor.displayName ?? monitor.name);
+
+                          return (
+                            <div key={statusPage.id} className="rounded-md border border-zinc-700 bg-zinc-950/70 p-3">
+                              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                <div>
+                                  <div className="flex items-center gap-2">
+                                    <div className="text-sm font-medium text-zinc-100">{statusPage.name}</div>
+                                    <span className={[
+                                      'rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.2em]',
+                                      statusPage.enabled
+                                        ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                                        : 'border-zinc-500/30 bg-zinc-500/10 text-zinc-200',
+                                    ].join(' ')}>
+                                      {statusPage.enabled ? 'Enabled' : 'Disabled'}
+                                    </span>
+                                  </div>
+                                  <div className="mt-1 text-xs text-zinc-400">Slug: /status/{statusPage.slug}</div>
+                                  {statusPage.description ? <div className="mt-2 text-xs text-zinc-300">{statusPage.description}</div> : null}
+                                </div>
+                                <a
+                                  href={`/status/${statusPage.slug}`}
+                                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-100"
+                                >
+                                  View public page
+                                </a>
+                              </div>
+
+                              <div className="mt-2 text-xs text-zinc-400">
+                                Monitors: {monitorNames.length > 0 ? monitorNames.join(', ') : 'None'}
+                              </div>
+
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => void handleToggleStatusPage(statusPage)}
+                                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-100"
+                                >
+                                  {statusPage.enabled ? 'Disable' : 'Enable'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => beginEditStatusPage(statusPage)}
+                                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-100"
+                                >
+                                  Edit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDeleteStatusPage(statusPage)}
                                   className="rounded-md border border-red-700 bg-red-950/30 px-3 py-2 text-xs text-red-200"
                                 >
                                   Delete

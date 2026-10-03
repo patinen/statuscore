@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  Inject,
   Param,
   Patch,
   Post,
@@ -55,7 +56,7 @@ class MonitorIncidentsLimitPipe {
 @Controller('monitors')
 @UseGuards(AuthGuard)
 export class MonitorsController {
-  constructor(private readonly monitorsService: MonitorService) {}
+  constructor(@Inject(MonitorService) private readonly monitorsService: MonitorService) {}
 
   @Get()
   listMonitors(@Req() req: Request & { user: SessionUser }) {

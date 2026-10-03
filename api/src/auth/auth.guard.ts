@@ -1,5 +1,6 @@
 import {
   CanActivate,
+  Inject,
   ExecutionContext,
   Injectable,
   UnauthorizedException,
@@ -9,7 +10,7 @@ import { AuthService } from './auth.service.js';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
-  constructor(private readonly authService: AuthService) {}
+  constructor(@Inject(AuthService) private readonly authService: AuthService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<Request & { user?: unknown }>();

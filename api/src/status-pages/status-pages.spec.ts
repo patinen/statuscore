@@ -1,0 +1,392 @@
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
+import { validate } from 'class-validator';
+import { readFileSync } from 'node:fs';
+import { describe, expect, it, vi } from 'vitest';
+import { CreateStatusPageDto, UpdateStatusPageDto } from './status-pages.dto.js';
+import { StatusPagesService } from './status-pages.service.js';
+
+const now = new Date('2026-10-03T00:00:00Z');
+
+const createService = (overrides: Record<string, unknown> = {}) => {
+  const prisma = {
+    monitor: {
+      count: vi.fn(),
+      findMany: vi.fn(),
+    },
+    statusPage: {
+      count: vi.fn(),
+      findUnique: vi.fn(),
+      findFirst: vi.fn(),
+      findMany: vi.fn(),
+      create: vi.fn(),
+      update: vi.fn(),
+      delete: vi.fn(),
+    },
+    statusPageMonitor: {
+      createMany: vi.fn(),
+      deleteMany: vi.fn(),
+    },
+    incident: {
+      findMany: vi.fn(),
+    },
+    $transaction: vi.fn(async (callback: (tx: any) => Promise<unknown>) => callback(prisma)),
+    ...overrides,
+  };
+
+  return { prisma, service: new StatusPagesService(prisma as never) };
+};
+
+describe('StatusPage DTOs', () => {
+  it('accepts the create payload shape and rejects reserved or invalid slugs', async () => {
+    const validCreate = Object.assign(new CreateStatusPageDto(), {
+      name: 'My Services',
+      slug: 'my-services',
+      description: 'Public services',
+      monitorIds: ['monitor-1', 'monitor-2'],
+    });
+
+    await expect(validate(validCreate)).resolves.toHaveLength(0);
+
+    for (const slug of ['My Services', 'foo/bar', '../admin', '-status', 'status-', 'api']) {
+      const dto = Object.assign(new CreateStatusPageDto(), {
+        name: 'My Services',
+        slug,
+        monitorIds: ['monitor-1'],
+      });
+
+      await expect(validate(dto)).resolves.not.toHaveLength(0);
+    }
+  });
+
+  it('accepts the update payload shape and leaves type-agnostic page edits intact', async () => {
+    const validUpdate = Object.assign(new UpdateStatusPageDto(), {
+      name: 'My Services',
+      slug: 'my-services-prod',
+      description: 'Public services',
+      enabled: false,
+      monitorIds: ['monitor-1'],
+    });
+
+    await expect(validate(validUpdate)).resolves.toHaveLength(0);
+  });
+});
+
+describe('StatusPagesService ownership and CRUD', () => {
+  it('creates status pages with valid slugs, rejects duplicates, enforces page and monitor limits, and rejects foreign monitors', async () => {
+    const { service, prisma } = createService();
+
+    prisma.statusPage.count.mockResolvedValueOnce(0);
+    prisma.statusPage.findUnique.mockResolvedValueOnce(null);
+    prisma.monitor.findMany.mockResolvedValueOnce([
+      { id: 'monitor-1', name: 'API' },
+      { id: 'monitor-2', name: 'Docs' },
+    ]);
+    prisma.statusPage.create.mockResolvedValueOnce({ id: 'page-1' });
+    prisma.statusPage.findFirst.mockResolvedValueOnce({
+      id: 'page-1',
+      userId: 'user-1',
+      name: 'My Services',
+      slug: 'my-services',
+      description: 'Public services',
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+      monitorAssociations: [
+        { monitorId: 'monitor-1', displayName: 'API', position: 0, createdAt: now, monitor: { id: 'monitor-1', name: 'API' } },
+        { monitorId: 'monitor-2', displayName: 'Docs', position: 1, createdAt: now, monitor: { id: 'monitor-2', name: 'Docs' } },
+      ],
+    });
+
+    await expect(
+      service.createForUser('user-1', {
+        name: 'My Services',
+        slug: 'my-services',
+        description: 'Public services',
+        monitorIds: ['monitor-1', 'monitor-2'],
+      }),
+    ).resolves.toMatchObject({
+      name: 'My Services',
+      slug: 'my-services',
+      description: 'Public services',
+      enabled: true,
+      monitorIds: ['monitor-1', 'monitor-2'],
+    });
+
+    expect(prisma.statusPageMonitor.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.arrayContaining([
+          expect.objectContaining({ statusPageId: 'page-1', monitorId: 'monitor-1', position: 0 }),
+          expect.objectContaining({ statusPageId: 'page-1', monitorId: 'monitor-2', position: 1 }),
+        ]),
+      }),
+    );
+
+    prisma.statusPage.count.mockResolvedValueOnce(5);
+    await expect(
+      service.createForUser('user-1', {
+        name: 'Overflow',
+        slug: 'overflow',
+        monitorIds: [],
+      }),
+    ).rejects.toThrow(BadRequestException);
+
+    prisma.statusPage.count.mockResolvedValueOnce(0);
+    prisma.statusPage.findUnique.mockResolvedValueOnce({ id: 'existing-page' });
+    await expect(
+      service.createForUser('user-1', {
+        name: 'Duplicate',
+        slug: 'my-services',
+        monitorIds: [],
+      }),
+    ).rejects.toThrow(ConflictException);
+
+    prisma.statusPage.findUnique.mockResolvedValueOnce(null);
+    prisma.monitor.findMany.mockResolvedValueOnce([]);
+    await expect(
+      service.createForUser('user-1', {
+        name: 'Foreign',
+        slug: 'foreign',
+        monitorIds: ['other-users-monitor'],
+      }),
+    ).rejects.toThrow(BadRequestException);
+
+    prisma.statusPage.count.mockResolvedValueOnce(0);
+    prisma.statusPage.findUnique.mockResolvedValueOnce(null);
+    prisma.monitor.findMany.mockResolvedValueOnce([
+      { id: 'monitor-1', name: 'API' },
+      { id: 'monitor-2', name: 'Docs' },
+      { id: 'monitor-3', name: 'Ops' },
+    ]);
+    await expect(
+      service.createForUser('user-1', {
+        name: 'Too Many',
+        slug: 'too-many',
+        monitorIds: Array.from({ length: 26 }, (_, index) => `monitor-${index + 1}`),
+      }),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('rejects reads, updates, and deletes for another user and replaces monitor associations atomically', async () => {
+    const callOrder: string[] = [];
+    const unauthorized = createService();
+
+    unauthorized.prisma.statusPage.findFirst.mockResolvedValue(null);
+
+    await expect(unauthorized.service.getForUser('user-a', 'page-1')).rejects.toThrow(NotFoundException);
+    await expect(unauthorized.service.updateForUser('user-a', 'page-1', { enabled: false })).rejects.toThrow(NotFoundException);
+    await expect(unauthorized.service.deleteForUser('user-a', 'page-1')).rejects.toThrow(NotFoundException);
+
+    const { service, prisma } = createService();
+
+    prisma.statusPage.findFirst.mockResolvedValueOnce({ id: 'page-1', slug: 'my-services' });
+    prisma.monitor.findMany.mockResolvedValueOnce([{ id: 'monitor-2', name: 'Docs' }]);
+    prisma.statusPage.update.mockImplementation(async () => {
+      callOrder.push('update');
+      return { id: 'page-1' };
+    });
+    prisma.statusPageMonitor.deleteMany.mockImplementation(async () => {
+      callOrder.push('delete');
+      return { count: 1 };
+    });
+    prisma.statusPageMonitor.createMany.mockImplementation(async () => {
+      callOrder.push('create');
+      return { count: 1 };
+    });
+    prisma.statusPage.findFirst.mockResolvedValueOnce({
+      id: 'page-1',
+      userId: 'user-1',
+      name: 'My Services',
+      slug: 'my-services',
+      description: null,
+      enabled: true,
+      createdAt: now,
+      updatedAt: now,
+      monitorAssociations: [
+        { monitorId: 'monitor-2', displayName: 'Docs', position: 0, createdAt: now, monitor: { id: 'monitor-2', name: 'Docs' } },
+      ],
+    });
+
+    await expect(
+      service.updateForUser('user-1', 'page-1', {
+        name: 'My Services v2',
+        enabled: false,
+        monitorIds: ['monitor-2'],
+      }),
+    ).resolves.toMatchObject({
+      name: 'My Services',
+      slug: 'my-services',
+      monitorIds: ['monitor-2'],
+    });
+
+    expect(callOrder).toEqual(['update', 'delete', 'create']);
+  });
+
+  it('deletes the status page cascade relationship in the migration', () => {
+    const migration = readFileSync(
+      new URL('../../prisma/migrations/20261003160000_add_status_pages/migration.sql', import.meta.url),
+      'utf8',
+    );
+
+    expect(migration).toContain('ALTER TABLE "StatusPageMonitor" ADD CONSTRAINT "StatusPageMonitor_monitorId_fkey" FOREIGN KEY ("monitorId") REFERENCES "Monitor"("id") ON DELETE CASCADE');
+    expect(migration).toContain('ALTER TABLE "StatusPageMonitor" ADD CONSTRAINT "StatusPageMonitor_statusPageId_fkey" FOREIGN KEY ("statusPageId") REFERENCES "StatusPage"("id") ON DELETE CASCADE');
+  });
+});
+
+describe('StatusPagesService public status API', () => {
+  it('returns a safe public response for enabled pages and maps monitor states and incidents', async () => {
+    const { service, prisma } = createService();
+
+    prisma.statusPage.findFirst.mockResolvedValueOnce({
+      id: 'page-1',
+      name: 'My Services',
+      slug: 'my-services',
+      description: 'Public services',
+      enabled: true,
+      updatedAt: now,
+      monitorAssociations: [
+        {
+          monitorId: 'monitor-1',
+          displayName: 'API',
+          monitor: { name: 'API', enabled: true, currentStatus: 'UP', lastCheckedAt: now },
+        },
+        {
+          monitorId: 'monitor-2',
+          displayName: 'Docs',
+          monitor: { name: 'Docs', enabled: false, currentStatus: 'DOWN', lastCheckedAt: null },
+        },
+      ],
+    });
+    prisma.incident.findMany
+      .mockResolvedValueOnce([
+        { monitorId: 'monitor-1', startedAt: now, reason: 'API unavailable' },
+        { monitorId: 'monitor-2', startedAt: now, reason: 'Docs unavailable' },
+      ])
+      .mockResolvedValueOnce([
+        { monitorId: 'monitor-1', startedAt: new Date('2026-10-02T00:00:00Z'), resolvedAt: now, reason: 'Recovered' },
+        { monitorId: 'monitor-2', startedAt: new Date('2026-10-01T00:00:00Z'), resolvedAt: now, reason: 'Recovered' },
+      ]);
+
+    const result = await service.getPublicBySlug('my-services');
+
+    expect(result).toMatchObject({
+      page: {
+        name: 'My Services',
+        slug: 'my-services',
+        description: 'Public services',
+      },
+      overallStatus: 'UNKNOWN',
+      monitors: [
+        { name: 'API', status: 'OPERATIONAL', lastCheckedAt: now },
+        { name: 'Docs', status: 'UNKNOWN', lastCheckedAt: null },
+      ],
+      activeIncidents: [
+        { monitorName: 'API', reason: 'API unavailable' },
+        { monitorName: 'Docs', reason: 'Docs unavailable' },
+      ],
+      recentIncidents: [
+        { monitorName: 'API', reason: 'Recovered' },
+        { monitorName: 'Docs', reason: 'Recovered' },
+      ],
+    });
+
+    expect(result?.page).not.toHaveProperty('userId');
+    expect(result?.monitors[0]).not.toHaveProperty('url');
+    expect(result?.activeIncidents[0]).not.toHaveProperty('lastError');
+  });
+
+  it('returns outage when any included monitor is down and unknown when all are unknown or disabled', async () => {
+    const { service, prisma } = createService();
+
+    prisma.statusPage.findFirst
+      .mockResolvedValueOnce({
+        id: 'page-1',
+        name: 'Ops',
+        slug: 'ops',
+        description: null,
+        enabled: true,
+        updatedAt: now,
+        monitorAssociations: [
+          { monitorId: 'monitor-1', displayName: null, monitor: { name: 'API', enabled: true, currentStatus: 'UP', lastCheckedAt: now } },
+          { monitorId: 'monitor-2', displayName: null, monitor: { name: 'Docs', enabled: true, currentStatus: 'DOWN', lastCheckedAt: now } },
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: 'page-2',
+        name: 'Unknown',
+        slug: 'unknown',
+        description: null,
+        enabled: true,
+        updatedAt: now,
+        monitorAssociations: [
+          { monitorId: 'monitor-3', displayName: null, monitor: { name: 'Jobs', enabled: false, currentStatus: 'DOWN', lastCheckedAt: now } },
+          { monitorId: 'monitor-4', displayName: null, monitor: { name: 'Cache', enabled: true, currentStatus: 'UNKNOWN', lastCheckedAt: null } },
+        ],
+      })
+      .mockResolvedValueOnce(null);
+
+    prisma.incident.findMany.mockResolvedValue([]);
+
+    await expect(service.getPublicBySlug('ops')).resolves.toMatchObject({ overallStatus: 'OUTAGE' });
+    await expect(service.getPublicBySlug('unknown')).resolves.toMatchObject({ overallStatus: 'UNKNOWN' });
+    await expect(service.getPublicBySlug('missing')).resolves.toBeNull();
+  });
+
+  it('keeps public incident history bounded, sorted, and scoped to included monitors', async () => {
+    const { service, prisma } = createService();
+
+    prisma.statusPage.findFirst.mockResolvedValueOnce({
+      id: 'page-1',
+      name: 'My Services',
+      slug: 'my-services',
+      description: null,
+      enabled: true,
+      updatedAt: now,
+      monitorAssociations: [
+        { monitorId: 'monitor-1', displayName: null, monitor: { name: 'API', enabled: true, currentStatus: 'UP', lastCheckedAt: now } },
+        { monitorId: 'monitor-2', displayName: null, monitor: { name: 'Docs', enabled: true, currentStatus: 'UP', lastCheckedAt: now } },
+      ],
+    });
+
+    const recentHistory = Array.from({ length: 25 }, (_, index) => ({
+      monitorId: index % 2 === 0 ? 'monitor-1' : 'monitor-2',
+      startedAt: new Date(`2026-10-${String(25 - index).padStart(2, '0')}T00:00:00Z`),
+      resolvedAt: now,
+      reason: `Resolved ${index}`,
+    }));
+
+    prisma.incident.findMany
+      .mockResolvedValueOnce([
+        { monitorId: 'monitor-1', startedAt: now, reason: 'Open API incident' },
+        { monitorId: 'monitor-2', startedAt: now, reason: 'Open Docs incident' },
+      ])
+      .mockImplementationOnce(async (args: { take?: number }) => recentHistory.slice(0, args.take ?? recentHistory.length));
+
+    const result = await service.getPublicBySlug('my-services');
+
+    expect(prisma.incident.findMany).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        where: expect.objectContaining({
+          monitorId: { in: ['monitor-1', 'monitor-2'] },
+          resolvedAt: null,
+        }),
+      }),
+    );
+    expect(prisma.incident.findMany).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        where: expect.objectContaining({
+          monitorId: { in: ['monitor-1', 'monitor-2'] },
+          resolvedAt: { not: null },
+        }),
+        take: 20,
+        orderBy: { startedAt: 'desc' },
+      }),
+    );
+
+    expect(result?.activeIncidents).toHaveLength(2);
+    expect(result?.recentIncidents).toHaveLength(20);
+    expect(result?.recentIncidents[0].reason).toBe('Resolved 0');
+    expect(result?.recentIncidents[19].reason).toBe('Resolved 19');
+  });
+});
