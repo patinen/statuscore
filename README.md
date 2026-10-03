@@ -148,4 +148,9 @@ NEXT_PUBLIC_API_URL=http://localhost:3001
 
 ## Notes
 
-The current implementation includes authenticated monitoring, a queue-backed scheduler, protected outbound HTTP checks, and persisted check results. It intentionally excludes incidents, alerting, and public status features for this phase.
+The current implementation includes authenticated monitoring, a queue-backed scheduler, protected outbound HTTP checks, persisted check results, and incident lifecycle tracking. The monitor lifecycle is:
+
+- failure threshold reached -> monitor DOWN -> incident opens
+- continued failures -> same incident remains open
+- successful check -> monitor UP -> incident resolves
+- disabled DOWN monitor -> incident remains open until a successful check after monitoring resumes

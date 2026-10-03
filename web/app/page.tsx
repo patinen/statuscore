@@ -11,9 +11,7 @@ type User = {
 
 type MonitorIncident = {
   id: string;
-  monitorId: string;
   startedAt: string;
-  resolvedAt: string | null;
   reason: string | null;
   lastError: string | null;
 };

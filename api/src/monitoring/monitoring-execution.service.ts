@@ -36,6 +36,37 @@ export class MonitorExecutionService {
     }
   }
 
+  private isRetryableMonitorTransactionError(error: unknown): boolean {
+    const code =
+      error instanceof Prisma.PrismaClientKnownRequestError
+        ? error.code
+        : error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+          ? error.code
+          : undefined;
+
+    if (code === 'P2034') {
+      return true;
+    }
+
+    if (code !== 'P2002') {
+      return false;
+    }
+
+    const meta =
+      error && typeof error === 'object' && 'meta' in error && error.meta && typeof error.meta === 'object'
+        ? error.meta
+        : undefined;
+
+    const rawTargets = meta && 'target' in meta ? meta.target : undefined;
+    const targets = Array.isArray(rawTargets)
+      ? rawTargets
+      : typeof rawTargets === 'string'
+        ? [rawTargets]
+        : [];
+
+    return targets.some((target) => typeof target === 'string' && /monitorId|Incident_monitorId_active_unique/i.test(target));
+  }
+
   private async withSerializableRetry<T>(operation: (tx: Parameters<typeof this.prisma.$transaction>[0] extends (tx: infer T) => any ? T : never) => Promise<T>): Promise<T> {
     for (let attempt = 0; attempt < MAX_TRANSACTION_RETRIES; attempt += 1) {
       try {
@@ -43,19 +74,12 @@ export class MonitorExecutionService {
           isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
         });
       } catch (error) {
-        const code =
-          error instanceof Prisma.PrismaClientKnownRequestError
-            ? error.code
-            : error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
-              ? error.code
-              : undefined;
-
-        if (code !== 'P2034' || attempt === MAX_TRANSACTION_RETRIES - 1) {
+        if (!this.isRetryableMonitorTransactionError(error) || attempt === MAX_TRANSACTION_RETRIES - 1) {
           throw error;
         }
 
         this.logger.warn(
-          `Serialization conflict while processing monitor transaction; retrying ${attempt + 1}/${MAX_TRANSACTION_RETRIES}.`,
+          `Monitor transaction conflict while processing monitor; retrying ${attempt + 1}/${MAX_TRANSACTION_RETRIES}.`,
         );
       }
     }

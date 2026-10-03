@@ -635,6 +635,64 @@ describe('Incident lifecycle and access rules', () => {
     );
   });
 
+  it('retries a unique open-incident race before succeeding', async () => {
+    const tx = {
+      checkResult: { create: vi.fn().mockResolvedValue(undefined) },
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'DOWN',
+          consecutiveFailures: 3,
+          failureThreshold: 3,
+          expectedStatusCode: 200,
+          url: 'https://example.com',
+          method: 'GET',
+          timeoutMs: 1000,
+        }),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+      incident: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'incident-1',
+          monitorId: 'm1',
+          startedAt: new Date('2024-01-01T00:00:00Z'),
+          resolvedAt: null,
+          reason: 'Expected HTTP 200 but received 500.',
+          lastError: 'Unexpected status code 500.',
+        }),
+        create: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+
+    const prisma = {
+      monitor: { findUnique: vi.fn().mockResolvedValue({ id: 'm1', enabled: true, currentStatus: 'DOWN', consecutiveFailures: 3, failureThreshold: 3, expectedStatusCode: 200, url: 'https://example.com', method: 'GET', timeoutMs: 1000 }) },
+      $transaction: vi.fn()
+        .mockRejectedValueOnce(Object.assign(new Error('Unique constraint failed on the fields: (`monitorId`)'), { code: 'P2002', meta: { target: ['monitorId'] } }))
+        .mockImplementationOnce(async (callback) => callback(tx)),
+    };
+
+    const service = new MonitorExecutionService(prisma as never, {
+      executeCheck: vi.fn().mockResolvedValue({ success: true, statusCode: 200, responseTimeMs: 10, errorType: null, errorMessage: null }),
+    } as never);
+
+    await service.processMonitorCheck('m1');
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(tx.incident.create).not.toHaveBeenCalled();
+    expect(tx.checkResult.create).toHaveBeenCalledTimes(1);
+    expect(tx.monitor.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'm1' },
+        data: expect.objectContaining({
+          currentStatus: 'UP',
+          consecutiveFailures: 0,
+        }),
+      }),
+    );
+  });
+
   it('retries a serializable conflict before succeeding', async () => {
     const tx = {
       checkResult: { create: vi.fn().mockResolvedValue(undefined) },
