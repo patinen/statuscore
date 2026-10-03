@@ -475,7 +475,7 @@ export class StatusPagesService {
                 orderBy: { createdAt: 'asc' },
               },
               updates: {
-                orderBy: { createdAt: 'asc' },
+                orderBy: { createdAt: 'desc' },
                 take: 50,
               },
             },
@@ -510,7 +510,7 @@ export class StatusPagesService {
                 orderBy: { createdAt: 'asc' },
               },
               updates: {
-                orderBy: { createdAt: 'asc' },
+                orderBy: { createdAt: 'desc' },
                 take: 50,
               },
             },
@@ -554,7 +554,7 @@ export class StatusPagesService {
         status: update.status,
         message: update.message,
         createdAt: update.createdAt,
-      })),
+      })).sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime()),
     });
 
     return {

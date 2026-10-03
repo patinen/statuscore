@@ -153,7 +153,7 @@ export class ManualIncidentsService {
           },
         },
         updates: {
-          orderBy: { createdAt: 'asc' },
+          orderBy: { createdAt: 'desc' },
           take: updatesTake,
         },
       },
@@ -255,46 +255,50 @@ export class ManualIncidentsService {
   async createUpdateForUser(userId: string, incidentId: string, data: CreateManualIncidentUpdateDto) {
     const message = data.message.trim();
 
-    const existing = await this.prisma.manualIncident.findFirst({
-      where: {
-        id: incidentId,
-        userId,
-      },
-      select: {
-        id: true,
-        status: true,
-        resolvedAt: true,
-      },
-    });
-
-    if (!existing) {
-      throw new NotFoundException('Manual incident not found.');
-    }
-
-    if (existing.status === ManualIncidentStatus.RESOLVED && data.status !== ManualIncidentStatus.RESOLVED) {
-      throw new BadRequestException('Resolved manual incidents cannot be reopened in this phase.');
-    }
-
-    const timestamp = new Date();
-
     await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.manualIncident.findFirst({
+        where: {
+          id: incidentId,
+          userId,
+        },
+        select: {
+          id: true,
+          status: true,
+        },
+      });
+
+      if (!existing) {
+        throw new NotFoundException('Manual incident not found.');
+      }
+
+      if (existing.status === ManualIncidentStatus.RESOLVED) {
+        throw new BadRequestException('Resolved manual incidents cannot be updated in this phase.');
+      }
+
+      const timestamp = new Date();
+
+      const updatedIncident = await tx.manualIncident.updateMany({
+        where: {
+          id: incidentId,
+          userId,
+          status: { not: ManualIncidentStatus.RESOLVED },
+        },
+        data: {
+          status: data.status,
+          resolvedAt: data.status === ManualIncidentStatus.RESOLVED ? timestamp : null,
+        },
+      });
+
+      if (updatedIncident.count !== 1) {
+        throw new BadRequestException('Resolved manual incidents cannot be reopened in this phase.');
+      }
+
       await tx.manualIncidentUpdate.create({
         data: {
           manualIncidentId: incidentId,
           status: data.status,
           message,
           createdAt: timestamp,
-        },
-      });
-
-      await tx.manualIncident.update({
-        where: { id: incidentId },
-        data: {
-          status: data.status,
-          resolvedAt:
-            data.status === ManualIncidentStatus.RESOLVED
-              ? timestamp
-              : existing.resolvedAt,
         },
       });
     });

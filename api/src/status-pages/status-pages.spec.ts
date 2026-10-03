@@ -909,4 +909,69 @@ describe('StatusPagesService public status API', () => {
     expect(result?.recentResolvedManualIncidents[0].title).toBe('Resolved 0');
     expect(result?.recentResolvedManualIncidents[19].title).toBe('Resolved 19');
   });
+
+  it('returns only the most recent 50 manual-incident updates in chronological order for public timelines', async () => {
+    const { service, prisma, maintenanceWindowsService } = createService();
+
+    prisma.statusPage.findFirst.mockResolvedValueOnce({
+      id: 'page-1',
+      userId: 'user-1',
+      name: 'Public',
+      slug: 'public-latest-updates',
+      description: null,
+      enabled: true,
+      updatedAt: now,
+      monitorAssociations: [
+        { monitorId: 'm1', displayName: null, monitor: { name: 'API', enabled: true, currentStatus: 'UP', lastCheckedAt: now } },
+      ],
+    });
+
+    prisma.incident.findMany.mockResolvedValue([]);
+
+    const newestUpdatesFirst = Array.from({ length: 50 }, (_, index) => {
+      const sequence = 60 - index;
+      return {
+        status: sequence === 60 ? 'RESOLVED' : 'MONITORING',
+        message: `Update ${sequence}`,
+        createdAt: new Date(Date.UTC(2026, 9, 3, 0, sequence, 0)),
+      };
+    });
+
+    prisma.manualIncident.findMany
+      .mockResolvedValueOnce([
+        {
+          id: 'mi-1',
+          title: 'API incident',
+          impact: 'PARTIAL_OUTAGE',
+          status: 'MONITORING',
+          startedAt: now,
+          resolvedAt: null,
+          monitorAssociations: [{ monitorId: 'm1', monitor: { name: 'API' } }],
+          updates: newestUpdatesFirst,
+        },
+      ])
+      .mockResolvedValueOnce([]);
+
+    maintenanceWindowsService.getActivePublicMaintenanceForMonitors.mockResolvedValueOnce([]);
+
+    const result = await service.getPublicBySlug('public-latest-updates');
+
+    expect(prisma.manualIncident.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        include: expect.objectContaining({
+          updates: expect.objectContaining({
+            orderBy: { createdAt: 'desc' },
+            take: 50,
+          }),
+        }),
+      }),
+    );
+
+    const updates = result?.manualIncidents[0]?.updates ?? [];
+    expect(updates).toHaveLength(50);
+    expect(updates[0]?.message).toBe('Update 11');
+    expect(updates[49]?.message).toBe('Update 60');
+    expect(updates.some((entry) => entry.message === 'Update 1')).toBe(false);
+    expect(updates[49]?.status).toBe('RESOLVED');
+  });
 });
