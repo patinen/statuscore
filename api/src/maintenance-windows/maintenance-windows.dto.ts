@@ -6,10 +6,14 @@ import {
   IsArray,
   IsBoolean,
   IsOptional,
+  Matches,
   IsString,
   IsUUID,
   Length,
 } from 'class-validator';
+
+const ISO_8601_DATE_TIME_WITH_ZONE =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
 
 export class CreateMaintenanceWindowDto {
   @Transform(({ value }) => String(value ?? '').trim())
@@ -34,12 +38,16 @@ export class CreateMaintenanceWindowDto {
   @Length(1, 500)
   description?: string | null;
 
-  @Transform(({ value }) => String(value ?? ''))
   @IsString()
+  @Matches(ISO_8601_DATE_TIME_WITH_ZONE, {
+    message: 'startsAt must be an ISO-8601 date-time string with timezone.',
+  })
   startsAt: string;
 
-  @Transform(({ value }) => String(value ?? ''))
   @IsString()
+  @Matches(ISO_8601_DATE_TIME_WITH_ZONE, {
+    message: 'endsAt must be an ISO-8601 date-time string with timezone.',
+  })
   endsAt: string;
 
   @IsArray()
@@ -76,13 +84,17 @@ export class UpdateMaintenanceWindowDto {
   description?: string | null;
 
   @IsOptional()
-  @Transform(({ value }) => String(value ?? ''))
   @IsString()
+  @Matches(ISO_8601_DATE_TIME_WITH_ZONE, {
+    message: 'startsAt must be an ISO-8601 date-time string with timezone.',
+  })
   startsAt?: string;
 
   @IsOptional()
-  @Transform(({ value }) => String(value ?? ''))
   @IsString()
+  @Matches(ISO_8601_DATE_TIME_WITH_ZONE, {
+    message: 'endsAt must be an ISO-8601 date-time string with timezone.',
+  })
   endsAt?: string;
 
   @IsOptional()

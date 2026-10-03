@@ -200,7 +200,7 @@ export class MonitorService {
     const normalizedUrl = await this.targetUrlValidationService.validateAndNormalize(data.url);
     const enabled = data.enabled ?? true;
 
-    return this.prisma.monitor.create({
+    const created = await this.prisma.monitor.create({
       data: {
         userId: user.id,
         name: data.name.trim(),
@@ -216,6 +216,8 @@ export class MonitorService {
         nextCheckAt: this.nextCheckAtFor(enabled),
       },
     });
+
+    return this.getForUser(user.id, created.id);
   }
 
   async updateForUser(
@@ -249,7 +251,7 @@ export class MonitorService {
     const shouldEnable = data.enabled ?? existingMonitor.enabled;
     const nextCheckAt = data.enabled === undefined ? existingMonitor.nextCheckAt : this.nextCheckAtFor(shouldEnable);
 
-    return this.prisma.monitor.update({
+    await this.prisma.monitor.update({
       where: { id: monitorId },
       data: {
         ...(data.name !== undefined ? { name: data.name.trim() } : {}),
@@ -263,6 +265,8 @@ export class MonitorService {
         ...(data.enabled !== undefined ? { nextCheckAt } : {}),
       },
     });
+
+    return this.getForUser(userId, monitorId);
   }
 
   async deleteForUser(userId: string, monitorId: string): Promise<void> {

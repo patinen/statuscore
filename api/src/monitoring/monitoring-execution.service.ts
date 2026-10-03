@@ -149,6 +149,7 @@ export class MonitorExecutionService {
         expectedStatusCode: monitor.expectedStatusCode,
         timeoutMs: monitor.timeoutMs,
       });
+      const checkedAt = new Date();
 
       await this.withSerializableRetry(async (tx) => {
         const state = await tx.monitor.findUnique({ where: { id: monitorId } });
@@ -157,7 +158,6 @@ export class MonitorExecutionService {
           return;
         }
 
-        const checkedAt = new Date();
         const failureDuringMaintenance =
           !result.success &&
           (await this.maintenanceWindowsService?.isMonitorUnderActiveMaintenanceAtTx(tx, state.id, checkedAt));

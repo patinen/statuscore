@@ -981,6 +981,125 @@ describe('Incident lifecycle and access rules', () => {
     expect(tx.incident.create).toHaveBeenCalledTimes(1);
   });
 
+  it('reuses identical checkedAt across retry attempts so maintenance decision stays anchored to original check time', async () => {
+    vi.useFakeTimers();
+    const boundaryCheckedAt = new Date('2026-10-03T12:59:59.999Z');
+    vi.setSystemTime(boundaryCheckedAt);
+
+    const txAttempt1 = {
+      checkResult: { create: vi.fn().mockResolvedValue(undefined) },
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'UP',
+          consecutiveFailures: 2,
+          failureThreshold: 3,
+          expectedStatusCode: 200,
+          url: 'https://example.com',
+          method: 'GET',
+          timeoutMs: 1000,
+        }),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+      incident: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+
+    const txAttempt2 = {
+      checkResult: { create: vi.fn().mockResolvedValue(undefined) },
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'UP',
+          consecutiveFailures: 2,
+          failureThreshold: 3,
+          expectedStatusCode: 200,
+          url: 'https://example.com',
+          method: 'GET',
+          timeoutMs: 1000,
+        }),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+      incident: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue(undefined),
+        update: vi.fn().mockResolvedValue(undefined),
+      },
+    };
+
+    const maintenanceWindowsService = {
+      isMonitorUnderActiveMaintenanceAtTx: vi.fn(async (_tx: unknown, _monitorId: string, checkedAt: Date) => {
+        return checkedAt.getTime() < new Date('2026-10-03T13:00:00.000Z').getTime();
+      }),
+    };
+
+    const prisma = {
+      monitor: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'm1',
+          enabled: true,
+          currentStatus: 'UP',
+          consecutiveFailures: 2,
+          failureThreshold: 3,
+          expectedStatusCode: 200,
+          url: 'https://example.com',
+          method: 'GET',
+          timeoutMs: 1000,
+        }),
+      },
+      $transaction: vi
+        .fn()
+        .mockImplementationOnce(async (callback) => {
+          await callback(txAttempt1);
+          vi.setSystemTime(new Date('2026-10-03T13:00:00.005Z'));
+          throw Object.assign(new Error('serialization failure'), { code: 'P2034' });
+        })
+        .mockImplementationOnce(async (callback) => callback(txAttempt2)),
+    };
+
+    const service = new MonitorExecutionService(
+      prisma as never,
+      {
+        executeCheck: vi.fn().mockResolvedValue({
+          success: false,
+          statusCode: 500,
+          responseTimeMs: 10,
+          errorType: 'UNEXPECTED_STATUS',
+          errorMessage: 'Unexpected status code 500.',
+        }),
+      } as never,
+      maintenanceWindowsService as never,
+    );
+
+    await service.processMonitorCheck('m1');
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(2);
+    expect(maintenanceWindowsService.isMonitorUnderActiveMaintenanceAtTx).toHaveBeenCalledTimes(2);
+
+    const firstCheckedAt = maintenanceWindowsService.isMonitorUnderActiveMaintenanceAtTx.mock.calls[0][2] as Date;
+    const secondCheckedAt = maintenanceWindowsService.isMonitorUnderActiveMaintenanceAtTx.mock.calls[1][2] as Date;
+    expect(firstCheckedAt).toBe(secondCheckedAt);
+    expect(firstCheckedAt.toISOString()).toBe('2026-10-03T12:59:59.999Z');
+
+    expect(txAttempt2.incident.create).not.toHaveBeenCalled();
+    expect(txAttempt2.monitor.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          currentStatus: 'UP',
+          consecutiveFailures: 0,
+          lastCheckedAt: firstCheckedAt,
+        }),
+      }),
+    );
+
+    vi.useRealTimers();
+  });
+
   it('GET /incidents only returns the current user and allows open/resolved filters', async () => {
     const prisma = {
       incident: {
