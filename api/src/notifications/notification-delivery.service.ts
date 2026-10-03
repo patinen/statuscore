@@ -134,22 +134,6 @@ export class NotificationDeliveryService {
         channelType: channel.type,
         incidentId,
         eventType,
-        occurredAt: nextAttemptAt,
-        monitorNamesSnapshot: [incident.monitor.name],
-        payloadSnapshot: {
-          event: NotificationDeliveryService.eventName(eventType),
-          monitor: {
-            id: incident.monitor.id,
-            name: incident.monitor.name,
-            url: incident.monitor.url,
-          },
-          incident: {
-            id: incident.id,
-            startedAt: incident.startedAt,
-            resolvedAt: incident.resolvedAt,
-            reason: incident.reason,
-          },
-        },
         status: 'PENDING' as const,
         attemptCount: 0,
         nextAttemptAt,
@@ -413,21 +397,33 @@ export class NotificationDeliveryService {
   }
 
   private buildPayload(delivery: DeliveryTarget) {
-    const event = NotificationDeliveryService.eventName(delivery.eventType);
-    const occurredAt = delivery.occurredAt ?? delivery.createdAt;
+    if (NotificationDeliveryService.isManualEventType(delivery.eventType)) {
+      if (!delivery.payloadSnapshot || typeof delivery.payloadSnapshot !== 'object') {
+        throw new BadRequestException('Invalid manual incident notification snapshot.');
+      }
 
-    if (delivery.payloadSnapshot && typeof delivery.payloadSnapshot === 'object') {
       const snapshot = delivery.payloadSnapshot as Record<string, unknown>;
       return {
         ...snapshot,
-        event,
+        event: NotificationDeliveryService.eventName(delivery.eventType),
         deliveryId: delivery.id,
       } as Record<string, unknown>;
     }
 
     const monitor = delivery.incident?.monitor;
+    const occurredAt = delivery.eventType === 'INCIDENT_OPENED'
+      ? delivery.incident?.startedAt ?? delivery.occurredAt ?? delivery.createdAt
+      : delivery.incident?.resolvedAt ?? delivery.occurredAt ?? delivery.createdAt;
+    const durationMs = delivery.eventType === 'INCIDENT_RESOLVED'
+      ? (delivery.incident?.resolvedAt && delivery.incident?.startedAt
+        ? delivery.incident.resolvedAt.getTime() - delivery.incident.startedAt.getTime()
+        : 0)
+      : delivery.incident
+        ? Math.max(0, Date.now() - delivery.incident.startedAt.getTime())
+        : 0;
+
     return {
-      event,
+      event: NotificationDeliveryService.eventName(delivery.eventType),
       deliveryId: delivery.id,
       occurredAt: occurredAt.toISOString(),
       monitor: {
@@ -441,11 +437,7 @@ export class NotificationDeliveryService {
         startedAt: delivery.incident?.startedAt ?? occurredAt.toISOString(),
         resolvedAt: delivery.incident?.resolvedAt ?? null,
         reason: delivery.incident?.reason ?? '',
-        durationMs: delivery.incident?.resolvedAt
-          ? delivery.incident.resolvedAt.getTime() - delivery.incident.startedAt.getTime()
-          : delivery.incident
-            ? Math.max(0, Date.now() - delivery.incident.startedAt.getTime())
-            : 0,
+        durationMs,
       },
     } as Record<string, unknown>;
   }

@@ -656,31 +656,55 @@ describe('NotificationDeliveryService manual incident outbox', () => {
     expect(String(messageField?.value).length).toBeLessThanOrEqual(1024);
   });
 
-  it('keeps automatic event payload compatibility and event names', async () => {
+  it('keeps automatic event payload compatibility and event names from the real createForIncidentTransition path', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-04T00:30:00Z'));
+
     const service = createDeliveryService();
-    const automaticOpened = (service as any).buildPayload({
-      id: 'delivery-auto-opened',
-      userId: 'user-1',
-      eventType: 'INCIDENT_OPENED',
-      status: 'PENDING',
-      attemptCount: 0,
-      nextAttemptAt: null,
-      createdAt: new Date('2026-10-04T00:00:00Z'),
-      occurredAt: new Date('2026-10-04T00:00:00Z'),
-      incidentTitleSnapshot: null,
-      incidentImpactSnapshot: null,
-      incidentStatusSnapshot: null,
-      updateMessageSnapshot: null,
-      monitorNamesSnapshot: null,
-      payloadSnapshot: null,
-      channel: null,
+
+    const openedTx = {
       incident: {
-        id: 'inc-1',
+        findUnique: vi.fn(async () => ({
+          id: 'inc-opened',
+          monitor: {
+            id: 'm1',
+            userId: 'user-1',
+            name: 'API',
+            url: 'https://api.example.com',
+          },
+          startedAt: new Date('2026-10-04T00:00:00Z'),
+          resolvedAt: null,
+          reason: 'Gateway timeout',
+        })),
+      },
+      notificationChannel: {
+        findMany: vi.fn(async () => [
+          { id: 'ch-1', userId: 'user-1', name: 'Ops hook', type: 'WEBHOOK' },
+        ]),
+      },
+      notificationDelivery: {
+        createMany: vi.fn(async ({ data }: any) => ({ count: data.length })),
+      },
+    } as any;
+
+    await service.createForIncidentTransition(openedTx, 'inc-opened', 'INCIDENT_OPENED', ['ch-1'], new Date('2026-10-04T00:30:00Z'));
+    const openedRow = openedTx.notificationDelivery.createMany.mock.calls[0][0].data[0];
+
+    expect(openedRow).not.toHaveProperty('payloadSnapshot');
+
+    const openedPayload = (service as any).buildPayload({
+      ...openedRow,
+      id: 'delivery-opened',
+      createdAt: new Date('2026-10-04T00:30:00Z'),
+      occurredAt: null,
+      payloadSnapshot: null,
+      incident: {
+        id: 'inc-opened',
         monitorId: 'm1',
         startedAt: new Date('2026-10-04T00:00:00Z'),
         resolvedAt: null,
         reason: 'Gateway timeout',
-        lastError: 'ETIMEDOUT',
+        lastError: null,
         monitor: {
           id: 'm1',
           name: 'API',
@@ -711,7 +735,118 @@ describe('NotificationDeliveryService manual incident outbox', () => {
       },
     });
 
-    expect(automaticOpened.event).toBe('incident.opened');
-    expect(automaticOpened.monitor.url).toBe('https://api.example.com');
+    expect(openedPayload).toMatchObject({
+      event: 'incident.opened',
+      deliveryId: 'delivery-opened',
+      occurredAt: '2026-10-04T00:00:00.000Z',
+      monitor: {
+        id: 'm1',
+        name: 'API',
+        url: 'https://api.example.com',
+        status: 'DOWN',
+      },
+      incident: {
+        id: 'inc-opened',
+        startedAt: new Date('2026-10-04T00:00:00Z'),
+        resolvedAt: null,
+        reason: 'Gateway timeout',
+        durationMs: 1800000,
+      },
+    });
+
+    const resolvedTx = {
+      incident: {
+        findUnique: vi.fn(async () => ({
+          id: 'inc-resolved',
+          monitor: {
+            id: 'm1',
+            userId: 'user-1',
+            name: 'API',
+            url: 'https://api.example.com',
+          },
+          startedAt: new Date('2026-10-04T00:00:00Z'),
+          resolvedAt: new Date('2026-10-04T00:12:00Z'),
+          reason: 'Recovered',
+        })),
+      },
+      notificationChannel: {
+        findMany: vi.fn(async () => [
+          { id: 'ch-1', userId: 'user-1', name: 'Ops hook', type: 'DISCORD' },
+        ]),
+      },
+      notificationDelivery: {
+        createMany: vi.fn(async ({ data }: any) => ({ count: data.length })),
+      },
+    } as any;
+
+    await service.createForIncidentTransition(resolvedTx, 'inc-resolved', 'INCIDENT_RESOLVED', ['ch-1'], new Date('2026-10-04T00:30:00Z'));
+    const resolvedRow = resolvedTx.notificationDelivery.createMany.mock.calls[0][0].data[0];
+    const resolvedPayload = (service as any).buildPayload({
+      ...resolvedRow,
+      id: 'delivery-resolved',
+      createdAt: new Date('2026-10-04T00:30:00Z'),
+      occurredAt: null,
+      payloadSnapshot: null,
+      incident: {
+        id: 'inc-resolved',
+        monitorId: 'm1',
+        startedAt: new Date('2026-10-04T00:00:00Z'),
+        resolvedAt: new Date('2026-10-04T00:12:00Z'),
+        reason: 'Recovered',
+        lastError: null,
+        monitor: {
+          id: 'm1',
+          name: 'API',
+          url: 'https://api.example.com',
+          userId: 'user-1',
+          method: 'GET',
+          expectedStatusCode: 200,
+          intervalSeconds: 60,
+          timeoutMs: 10000,
+          failureThreshold: 3,
+          enabled: true,
+          currentStatus: 'UP',
+          consecutiveFailures: 0,
+          lastCheckedAt: null,
+          nextCheckAt: null,
+          createdAt: new Date('2026-10-04T00:00:00Z'),
+          updatedAt: new Date('2026-10-04T00:12:00Z'),
+          user: {
+            id: 'user-1',
+            githubId: 'gh-1',
+            login: 'ops',
+            name: null,
+            avatarUrl: null,
+            createdAt: new Date('2026-10-04T00:00:00Z'),
+            updatedAt: new Date('2026-10-04T00:00:00Z'),
+          },
+        },
+      },
+    });
+
+    expect(resolvedPayload).toMatchObject({
+      event: 'incident.resolved',
+      deliveryId: 'delivery-resolved',
+      occurredAt: '2026-10-04T00:12:00.000Z',
+      monitor: {
+        id: 'm1',
+        name: 'API',
+        url: 'https://api.example.com',
+        status: 'UP',
+      },
+      incident: {
+        id: 'inc-resolved',
+        startedAt: new Date('2026-10-04T00:00:00Z'),
+        resolvedAt: new Date('2026-10-04T00:12:00Z'),
+        reason: 'Recovered',
+        durationMs: 720000,
+      },
+    });
+
+    const resolvedDiscord = (service as any).buildDiscordPayload('INCIDENT_RESOLVED', resolvedPayload, 'delivery-resolved');
+    expect(resolvedDiscord.embeds[0].fields.find((field: { name: string }) => field.name === 'Duration')?.value).toBe('720000');
+    expect(resolvedDiscord.allowed_mentions.parse).toEqual([]);
+
+    vi.useRealTimers();
   });
 });
