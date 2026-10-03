@@ -187,7 +187,10 @@ export class AnalyticsService {
       SELECT
         (SELECT COUNT(*)::int FROM clamped) AS "totalIncidents",
         COALESCE(SUM(EXTRACT(EPOCH FROM ("mergedEnd" - "mergedStart")) * 1000.0), 0)::double precision AS "totalDowntimeMs",
-        COALESCE(MAX(EXTRACT(EPOCH FROM ("mergedEnd" - "mergedStart")) * 1000.0), 0)::double precision AS "longestDowntimeMs"
+        COALESCE((
+          SELECT MAX(EXTRACT(EPOCH FROM (c."effectiveEnd" - c."effectiveStart")) * 1000.0)
+          FROM clamped c
+        ), 0)::double precision AS "longestDowntimeMs"
       FROM merged
     `;
 
@@ -275,7 +278,7 @@ export class AnalyticsService {
 
     const monitors = await this.prisma.monitor.findMany({
       where: { userId },
-      select: { id: true, currentStatus: true },
+      select: { id: true, enabled: true, currentStatus: true },
     });
 
     const openIncidentCount = await this.prisma.incident.count({
@@ -305,8 +308,8 @@ export class AnalyticsService {
       FROM monitor_checks
     `;
 
-    const operationalCount = monitors.filter((monitor) => monitor.currentStatus === 'UP').length;
-    const outageCount = monitors.filter((monitor) => monitor.currentStatus === 'DOWN').length;
+    const operationalCount = monitors.filter((monitor) => monitor.enabled && monitor.currentStatus === 'UP').length;
+    const outageCount = monitors.filter((monitor) => monitor.enabled && monitor.currentStatus === 'DOWN').length;
     const unknownCount = monitors.length - operationalCount - outageCount;
 
     return {

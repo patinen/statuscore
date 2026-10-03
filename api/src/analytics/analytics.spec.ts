@@ -73,8 +73,8 @@ describe('AnalyticsService monitor analytics', () => {
       .mockResolvedValueOnce([
         {
           totalIncidents: 2,
-          totalDowntimeMs: 320000,
-          longestDowntimeMs: 240000,
+          totalDowntimeMs: 3000000,
+          longestDowntimeMs: 1800000,
         },
       ])
       .mockResolvedValueOnce([
@@ -112,8 +112,8 @@ describe('AnalyticsService monitor analytics', () => {
     });
     expect(result.incidents).toEqual({
       total: 2,
-      totalDowntimeMs: 320000,
-      longestDowntimeMs: 240000,
+      totalDowntimeMs: 3000000,
+      longestDowntimeMs: 1800000,
     });
     expect(result.series).toHaveLength(2);
     expect(result.series[0]).toMatchObject({
@@ -189,13 +189,15 @@ describe('AnalyticsService monitor analytics', () => {
 });
 
 describe('AnalyticsService overview', () => {
-  it('returns monitor state counts, open incident count, and average uptime excluding monitors with no checks', async () => {
+  it('maps disabled monitors to unknown while counting enabled status values', async () => {
     const { service, prisma } = createService();
 
     prisma.monitor.findMany.mockResolvedValueOnce([
-      { id: 'm1', currentStatus: 'UP' },
-      { id: 'm2', currentStatus: 'DOWN' },
-      { id: 'm3', currentStatus: 'UNKNOWN' },
+      { id: 'm1', enabled: true, currentStatus: 'UP' },
+      { id: 'm2', enabled: true, currentStatus: 'DOWN' },
+      { id: 'm3', enabled: true, currentStatus: 'UNKNOWN' },
+      { id: 'm4', enabled: false, currentStatus: 'UP' },
+      { id: 'm5', enabled: false, currentStatus: 'DOWN' },
     ]);
     prisma.incident.count.mockResolvedValueOnce(2);
     prisma.$queryRaw.mockResolvedValueOnce([{ averageUptimePercentage: 97.5 }]);
@@ -204,16 +206,16 @@ describe('AnalyticsService overview', () => {
 
     expect(result).toMatchObject({
       range: '24h',
-      monitorCount: 3,
+      monitorCount: 5,
       operationalCount: 1,
       outageCount: 1,
-      unknownCount: 1,
+      unknownCount: 3,
       openIncidentCount: 2,
       averageUptimePercentage: 97.5,
     });
     expect(prisma.monitor.findMany).toHaveBeenCalledWith({
       where: { userId: 'user-1' },
-      select: { id: true, currentStatus: true },
+      select: { id: true, enabled: true, currentStatus: true },
     });
     expect(prisma.incident.count).toHaveBeenCalledWith({
       where: {

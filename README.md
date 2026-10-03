@@ -217,6 +217,7 @@ Phase 7 analytics use fixed bounded ranges (`24h`, `7d`, `30d`) and UTC timestam
 - failed checks and null response times are excluded from latency calculations
 - unresolved incidents contribute downtime through the request `to` timestamp
 - overlapping incident intervals are merged for downtime duration aggregation to avoid double counting
+- `totalDowntimeMs` uses merged overlaps, while `longestDowntimeMs` represents the longest individual incident overlap within the window
 - public status pages remain unchanged and do not expose analytics history in this phase
 
 Analytics currently query raw `CheckResult` and `Incident` records with bounded aggregation. Future retention/rollups can replace raw-history query paths while preserving API contracts.
