@@ -3,7 +3,10 @@
 import { use, useEffect, useMemo, useState } from "react";
 
 type PublicMonitorStatus = "OPERATIONAL" | "OUTAGE" | "MAINTENANCE" | "UNKNOWN";
-type PublicPageStatus = "OPERATIONAL" | "OUTAGE" | "MAINTENANCE" | "UNKNOWN";
+type PublicPageStatus = "OPERATIONAL" | "OUTAGE" | "DEGRADED" | "MAINTENANCE" | "UNKNOWN";
+
+type PublicManualIncidentStatus = "INVESTIGATING" | "IDENTIFIED" | "MONITORING" | "RESOLVED";
+type PublicManualIncidentImpact = "DEGRADED" | "PARTIAL_OUTAGE" | "MAJOR_OUTAGE";
 
 type PublicStatusPageResponse = {
   page: {
@@ -37,6 +40,32 @@ type PublicStatusPageResponse = {
     endsAt: string;
     monitors: string[];
   }>;
+  manualIncidents: Array<{
+    title: string;
+    impact: PublicManualIncidentImpact;
+    status: PublicManualIncidentStatus;
+    startedAt: string;
+    resolvedAt: string | null;
+    monitors: string[];
+    updates: Array<{
+      status: PublicManualIncidentStatus;
+      message: string;
+      createdAt: string;
+    }>;
+  }>;
+  recentResolvedManualIncidents: Array<{
+    title: string;
+    impact: PublicManualIncidentImpact;
+    status: PublicManualIncidentStatus;
+    startedAt: string;
+    resolvedAt: string | null;
+    monitors: string[];
+    updates: Array<{
+      status: PublicManualIncidentStatus;
+      message: string;
+      createdAt: string;
+    }>;
+  }>;
 };
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -62,6 +91,10 @@ const statusCopy: Record<PublicPageStatus, { label: string; bannerClass: string 
     label: "Scheduled maintenance",
     bannerClass: "border-blue-500/30 bg-blue-500/10 text-blue-200",
   },
+  DEGRADED: {
+    label: "Partial service degradation",
+    bannerClass: "border-amber-500/30 bg-amber-500/10 text-amber-200",
+  },
   OUTAGE: {
     label: "Service outage",
     bannerClass: "border-red-500/30 bg-red-500/10 text-red-200",
@@ -70,6 +103,12 @@ const statusCopy: Record<PublicPageStatus, { label: string; bannerClass: string 
     label: "Status unknown",
     bannerClass: "border-zinc-500/30 bg-zinc-500/10 text-zinc-200",
   },
+};
+
+const manualImpactBadgeClass: Record<PublicManualIncidentImpact, string> = {
+  MAJOR_OUTAGE: "border-red-500/30 bg-red-500/10 text-red-200",
+  PARTIAL_OUTAGE: "border-amber-500/30 bg-amber-500/10 text-amber-200",
+  DEGRADED: "border-yellow-500/30 bg-yellow-500/10 text-yellow-200",
 };
 
 const monitorCopy: Record<PublicMonitorStatus, { label: string; className: string }> = {
@@ -284,6 +323,45 @@ export default function PublicStatusPage({ params }: { params: Promise<{ slug: s
           </section>
         ) : null}
 
+        {page?.manualIncidents.length ? (
+          <section className="mt-8 rounded-2xl border border-zinc-800 bg-[#101317] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+            <h2 className="text-lg font-medium text-white">Active manual incidents</h2>
+            <div className="mt-4 space-y-4">
+              {page.manualIncidents.map((incident) => (
+                <article key={`${incident.title}-${incident.startedAt}`} className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-base font-medium text-amber-100">{incident.title}</h3>
+                      <div className="mt-1 text-xs text-amber-200/80">Started {formatDateTime(incident.startedAt)}</div>
+                      <div className="mt-1 text-xs text-amber-100/80">
+                        Affected services: {incident.monitors.length > 0 ? incident.monitors.join(", ") : "None"}
+                      </div>
+                    </div>
+                    <span className={[
+                      "rounded-full border px-2 py-1 text-[10px] font-medium uppercase tracking-[0.2em]",
+                      manualImpactBadgeClass[incident.impact],
+                    ].join(" ")}>
+                      {incident.impact.replaceAll("_", " ")}
+                    </span>
+                  </div>
+
+                  <div className="mt-3 space-y-2">
+                    {incident.updates.map((update) => (
+                      <div key={`${incident.title}-${update.createdAt}-${update.status}`} className="rounded-md border border-zinc-700/60 bg-zinc-950/60 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-300">{update.status}</span>
+                          <span className="text-xs text-zinc-400">{formatDateTime(update.createdAt)}</span>
+                        </div>
+                        <div className="mt-1 text-sm text-zinc-200">{update.message}</div>
+                      </div>
+                    ))}
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
         <section className="mt-8 grid gap-4 lg:grid-cols-2">
           <article className="rounded-2xl border border-zinc-800 bg-[#101317] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
             <h2 className="text-lg font-medium text-white">Active incidents</h2>
@@ -328,6 +406,47 @@ export default function PublicStatusPage({ params }: { params: Promise<{ slug: s
             </div>
           </article>
         </section>
+
+        {page?.recentResolvedManualIncidents.length ? (
+          <section className="mt-8 rounded-2xl border border-zinc-800 bg-[#101317] p-5 shadow-[0_0_0_1px_rgba(255,255,255,0.02)]">
+            <h2 className="text-lg font-medium text-white">Recent resolved manual incidents</h2>
+            <div className="mt-4 space-y-4">
+              {page.recentResolvedManualIncidents.map((incident) => (
+                <article key={`${incident.title}-${incident.resolvedAt ?? incident.startedAt}`} className="rounded-xl border border-zinc-700 bg-zinc-950/70 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <h3 className="text-base font-medium text-zinc-100">{incident.title}</h3>
+                      <div className="mt-1 text-xs text-zinc-400">
+                        {formatDateTime(incident.startedAt)} to {formatDateTime(incident.resolvedAt)}
+                      </div>
+                      <div className="mt-1 text-xs text-zinc-300/80">
+                        Affected services: {incident.monitors.length > 0 ? incident.monitors.join(", ") : "None"}
+                      </div>
+                    </div>
+                    <span className={[
+                      "rounded-full border px-2 py-1 text-[10px] font-medium uppercase tracking-[0.2em]",
+                      manualImpactBadgeClass[incident.impact],
+                    ].join(" ")}>
+                      {incident.impact.replaceAll("_", " ")}
+                    </span>
+                  </div>
+
+                  <div className="mt-3 space-y-2">
+                    {incident.updates.map((update) => (
+                      <div key={`${incident.title}-${update.createdAt}-${update.status}`} className="rounded-md border border-zinc-700/60 bg-zinc-900/60 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-300">{update.status}</span>
+                          <span className="text-xs text-zinc-400">{formatDateTime(update.createdAt)}</span>
+                        </div>
+                        <div className="mt-1 text-sm text-zinc-200">{update.message}</div>
+                      </div>
+                    ))}
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        ) : null}
       </div>
     </main>
   );

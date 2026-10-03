@@ -173,6 +173,51 @@ type MaintenanceWindowForm = {
   monitorIds: string[];
 };
 
+type ManualIncidentStatus = "INVESTIGATING" | "IDENTIFIED" | "MONITORING" | "RESOLVED";
+type ManualIncidentImpact = "DEGRADED" | "PARTIAL_OUTAGE" | "MAJOR_OUTAGE";
+
+type ManualIncidentUpdate = {
+  id: string;
+  status: ManualIncidentStatus;
+  message: string;
+  createdAt: string;
+};
+
+type ManualIncident = {
+  id: string;
+  title: string;
+  status: ManualIncidentStatus;
+  impact: ManualIncidentImpact;
+  startedAt: string;
+  resolvedAt: string | null;
+  monitorIds: string[];
+  monitors: Array<{
+    monitorId: string;
+    name: string;
+  }>;
+  updates: ManualIncidentUpdate[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+type ManualIncidentForm = {
+  title: string;
+  impact: ManualIncidentImpact;
+  monitorIds: string[];
+  message: string;
+};
+
+type ManualIncidentMetadataForm = {
+  title: string;
+  impact: ManualIncidentImpact;
+  monitorIds: string[];
+};
+
+type ManualIncidentUpdateForm = {
+  status: Exclude<ManualIncidentStatus, "RESOLVED"> | "RESOLVED";
+  message: string;
+};
+
 type IncidentStatus = "all" | "open" | "resolved";
 type NotificationDeliveryStatus = "all" | "pending" | "sent" | "failed";
 
@@ -252,6 +297,18 @@ const defaultMaintenanceForm: MaintenanceWindowForm = {
   endsAtLocal: "",
   enabled: true,
   monitorIds: [],
+};
+
+const defaultManualIncidentForm: ManualIncidentForm = {
+  title: "",
+  impact: "DEGRADED",
+  monitorIds: [],
+  message: "",
+};
+
+const defaultManualIncidentUpdateForm: ManualIncidentUpdateForm = {
+  status: "INVESTIGATING",
+  message: "",
 };
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
@@ -339,6 +396,7 @@ export default function Home() {
   const [notificationChannels, setNotificationChannels] = useState<NotificationChannel[]>([]);
   const [statusPages, setStatusPages] = useState<StatusPage[]>([]);
   const [maintenanceWindows, setMaintenanceWindows] = useState<MaintenanceWindow[]>([]);
+  const [manualIncidents, setManualIncidents] = useState<ManualIncident[]>([]);
   const [incidentFilter, setIncidentFilter] = useState<IncidentStatus>("all");
   const [notificationFilter, setNotificationFilter] = useState<NotificationDeliveryStatus>("all");
   const [recentChecks, setRecentChecks] = useState<Record<string, MonitorCheckHistoryItem[]>>({});
@@ -350,6 +408,15 @@ export default function Home() {
   const [maintenanceForm, setMaintenanceForm] = useState<MaintenanceWindowForm>(defaultMaintenanceForm);
   const [editingMaintenanceWindowId, setEditingMaintenanceWindowId] = useState<string | null>(null);
   const [editingMaintenanceDescription, setEditingMaintenanceDescription] = useState<string | null>(null);
+  const [manualIncidentForm, setManualIncidentForm] = useState<ManualIncidentForm>(defaultManualIncidentForm);
+  const [selectedManualIncidentId, setSelectedManualIncidentId] = useState<string | null>(null);
+  const [manualIncidentUpdateForm, setManualIncidentUpdateForm] = useState<ManualIncidentUpdateForm>(defaultManualIncidentUpdateForm);
+  const [editingManualIncidentId, setEditingManualIncidentId] = useState<string | null>(null);
+  const [manualIncidentMetadataForm, setManualIncidentMetadataForm] = useState<ManualIncidentMetadataForm>({
+    title: "",
+    impact: "DEGRADED",
+    monitorIds: [],
+  });
   const [isLoadingChecks, setIsLoadingChecks] = useState<Record<string, boolean>>({});
   const [expandedMonitorId, setExpandedMonitorId] = useState<string | null>(null);
   const [analyticsRange, setAnalyticsRange] = useState<AnalyticsRange>("24h");
@@ -377,6 +444,23 @@ export default function Home() {
     return monitors[0]?.id ?? null;
   }, [isAuthenticated, monitors, selectedMonitorId]);
 
+  const activeManualIncidentId = useMemo(() => {
+    if (!isAuthenticated) {
+      return null;
+    }
+
+    if (selectedManualIncidentId && manualIncidents.some((incident) => incident.id === selectedManualIncidentId)) {
+      return selectedManualIncidentId;
+    }
+
+    return manualIncidents[0]?.id ?? null;
+  }, [isAuthenticated, manualIncidents, selectedManualIncidentId]);
+
+  const selectedManualIncident = useMemo(
+    () => manualIncidents.find((incident) => incident.id === activeManualIncidentId) ?? null,
+    [manualIncidents, activeManualIncidentId],
+  );
+
   useEffect(() => {
     let isActive = true;
 
@@ -388,11 +472,12 @@ export default function Home() {
         }
 
         setUser(currentUser);
-        const [list, channels, pages, maintenance] = await Promise.all([
+        const [list, channels, pages, maintenance, manual] = await Promise.all([
           apiRequest<Monitor[]>('/monitors'),
           apiRequest<NotificationChannel[]>('/notification-channels'),
           apiRequest<StatusPage[]>('/status-pages'),
           apiRequest<MaintenanceWindow[]>('/maintenance-windows'),
+          apiRequest<ManualIncident[]>('/manual-incidents?status=all&limit=50'),
         ]);
         if (!isActive) {
           return;
@@ -402,6 +487,7 @@ export default function Home() {
         setNotificationChannels(channels ?? []);
         setStatusPages(pages ?? []);
         setMaintenanceWindows(maintenance ?? []);
+        setManualIncidents(manual ?? []);
         setError(null);
       } catch {
         if (!isActive) {
@@ -411,6 +497,7 @@ export default function Home() {
         setUser(null);
         setMonitors([]);
         setMaintenanceWindows([]);
+        setManualIncidents([]);
         setSelectedMonitorId(null);
         setMonitorAnalytics(null);
         setAnalyticsOverview(null);
@@ -438,12 +525,13 @@ export default function Home() {
 
     const loadDashboard = async () => {
       try {
-        const [list, incidentList, notificationList, pageList, maintenanceList] = await Promise.all([
+        const [list, incidentList, notificationList, pageList, maintenanceList, manualIncidentList] = await Promise.all([
           apiRequest<Monitor[]>('/monitors'),
           apiRequest<IncidentRecord[]>(`/incidents?status=${incidentFilter}&limit=50`),
           apiRequest<NotificationDeliveryRecord[]>(`/notification-deliveries?status=${notificationFilter}&limit=10`),
           apiRequest<StatusPage[]>('/status-pages'),
           apiRequest<MaintenanceWindow[]>('/maintenance-windows'),
+          apiRequest<ManualIncident[]>('/manual-incidents?status=all&limit=50'),
         ]);
 
         if (!cancelled) {
@@ -452,6 +540,7 @@ export default function Home() {
           setNotifications(notificationList ?? []);
           setStatusPages(pageList ?? []);
           setMaintenanceWindows(maintenanceList ?? []);
+          setManualIncidents(manualIncidentList ?? []);
           setError(null);
         }
       } catch (pollError) {
@@ -542,6 +631,23 @@ export default function Home() {
     setEditingMaintenanceDescription(null);
   };
 
+  const resetManualIncidentCreateForm = () => {
+    setManualIncidentForm(defaultManualIncidentForm);
+  };
+
+  const resetManualIncidentUpdateForm = () => {
+    setManualIncidentUpdateForm(defaultManualIncidentUpdateForm);
+  };
+
+  const resetManualIncidentMetadataForm = () => {
+    setEditingManualIncidentId(null);
+    setManualIncidentMetadataForm({
+      title: "",
+      impact: "DEGRADED",
+      monitorIds: [],
+    });
+  };
+
   const updateForm = <K extends keyof MonitorForm>(key: K, value: MonitorForm[K]) => {
     setForm((currentForm) => ({ ...currentForm, [key]: value }));
   };
@@ -560,14 +666,19 @@ export default function Home() {
       setNotificationChannels([]);
       setStatusPages([]);
       setMaintenanceWindows([]);
+      setManualIncidents([]);
       setAnalyticsOverview(null);
       setMonitorAnalytics(null);
       setAnalyticsError(null);
       setSelectedMonitorId(null);
+      setSelectedManualIncidentId(null);
       resetForm();
       resetChannelForm();
       resetStatusPageForm();
       resetMaintenanceForm();
+      resetManualIncidentCreateForm();
+      resetManualIncidentUpdateForm();
+      resetManualIncidentMetadataForm();
     } catch (logoutError) {
       setError(logoutError instanceof Error ? logoutError.message : "Unable to log out.");
     }
@@ -652,6 +763,151 @@ export default function Home() {
       enabled: window.enabled,
       monitorIds: window.monitorIds,
     });
+  };
+
+  const toggleManualIncidentMonitor = (monitorId: string) => {
+    setManualIncidentForm((current) => {
+      const nextMonitorIds = current.monitorIds.includes(monitorId)
+        ? current.monitorIds.filter((value) => value !== monitorId)
+        : [...current.monitorIds, monitorId];
+
+      return { ...current, monitorIds: nextMonitorIds };
+    });
+  };
+
+  const toggleManualIncidentMetadataMonitor = (monitorId: string) => {
+    setManualIncidentMetadataForm((current) => {
+      const nextMonitorIds = current.monitorIds.includes(monitorId)
+        ? current.monitorIds.filter((value) => value !== monitorId)
+        : [...current.monitorIds, monitorId];
+
+      return { ...current, monitorIds: nextMonitorIds };
+    });
+  };
+
+  const beginEditManualIncident = (incident: ManualIncident) => {
+    setEditingManualIncidentId(incident.id);
+    setManualIncidentMetadataForm({
+      title: incident.title,
+      impact: incident.impact,
+      monitorIds: incident.monitorIds,
+    });
+  };
+
+  const handleCreateManualIncident = async () => {
+    const title = manualIncidentForm.title.trim();
+    const message = manualIncidentForm.message.trim();
+
+    if (!title) {
+      setError('Manual incident title is required.');
+      return;
+    }
+
+    if (!message) {
+      setError('Initial incident message is required.');
+      return;
+    }
+
+    if (manualIncidentForm.monitorIds.length === 0) {
+      setError('Select at least one affected monitor.');
+      return;
+    }
+
+    try {
+      setError(null);
+      const created = await apiRequest<ManualIncident>('/manual-incidents', {
+        method: 'POST',
+        body: JSON.stringify({
+          title,
+          impact: manualIncidentForm.impact,
+          monitorIds: manualIncidentForm.monitorIds,
+          message,
+        }),
+      });
+
+      setManualIncidents((current) => [created, ...current]);
+      setSelectedManualIncidentId(created.id);
+      resetManualIncidentCreateForm();
+      resetManualIncidentUpdateForm();
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : 'Unable to create manual incident.');
+    }
+  };
+
+  const handlePublishManualIncidentUpdate = async (incident: ManualIncident) => {
+    const message = manualIncidentUpdateForm.message.trim();
+
+    if (!message) {
+      setError('Incident update message is required.');
+      return;
+    }
+
+    try {
+      setError(null);
+      const updated = await apiRequest<ManualIncident>(`/manual-incidents/${incident.id}/updates`, {
+        method: 'POST',
+        body: JSON.stringify({
+          status: manualIncidentUpdateForm.status,
+          message,
+        }),
+      });
+
+      setManualIncidents((current) => current.map((item) => (item.id === incident.id ? updated : item)));
+      resetManualIncidentUpdateForm();
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : 'Unable to publish manual incident update.');
+    }
+  };
+
+  const handleSaveManualIncidentMetadata = async (incident: ManualIncident) => {
+    const title = manualIncidentMetadataForm.title.trim();
+
+    if (!title) {
+      setError('Manual incident title is required.');
+      return;
+    }
+
+    if (manualIncidentMetadataForm.monitorIds.length === 0) {
+      setError('Select at least one affected monitor.');
+      return;
+    }
+
+    try {
+      setError(null);
+      const updated = await apiRequest<ManualIncident>(`/manual-incidents/${incident.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          title,
+          impact: manualIncidentMetadataForm.impact,
+          monitorIds: manualIncidentMetadataForm.monitorIds,
+        }),
+      });
+
+      setManualIncidents((current) => current.map((item) => (item.id === incident.id ? updated : item)));
+      resetManualIncidentMetadataForm();
+    } catch (editError) {
+      setError(editError instanceof Error ? editError.message : 'Unable to update manual incident.');
+    }
+  };
+
+  const handleDeleteManualIncident = async (incident: ManualIncident) => {
+    if (!window.confirm(`Delete manual incident "${incident.title}"?`)) {
+      return;
+    }
+
+    try {
+      setError(null);
+      await apiRequest<void>(`/manual-incidents/${incident.id}`, { method: 'DELETE' });
+      setManualIncidents((current) => current.filter((item) => item.id !== incident.id));
+      if (selectedManualIncidentId === incident.id) {
+        setSelectedManualIncidentId(null);
+      }
+      if (editingManualIncidentId === incident.id) {
+        resetManualIncidentMetadataForm();
+      }
+    } catch (deleteError) {
+      setError(deleteError instanceof Error ? deleteError.message : 'Unable to delete manual incident.');
+    }
   };
 
   const handleChannelSubmit = async () => {
@@ -1555,6 +1811,271 @@ export default function Home() {
                         })}
                       </div>
                     ) : null}
+                  </div>
+
+                  <div className="rounded-lg border border-zinc-700 bg-zinc-950/40 p-5">
+                    <div className="mb-4 flex items-center justify-between gap-3">
+                      <div>
+                        <h2 className="text-xl font-medium text-zinc-50">Manual incidents</h2>
+                        <p className="mt-1 text-xs text-zinc-400">Human-authored incident communication that does not alter automatic check-based uptime.</p>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <label className="block text-sm text-zinc-300 md:col-span-1">
+                        Title
+                        <input
+                          value={manualIncidentForm.title}
+                          onChange={(event) => setManualIncidentForm((current) => ({ ...current, title: event.target.value }))}
+                          className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                          placeholder="Login issues"
+                        />
+                      </label>
+
+                      <label className="block text-sm text-zinc-300 md:col-span-1">
+                        Impact
+                        <select
+                          value={manualIncidentForm.impact}
+                          onChange={(event) => setManualIncidentForm((current) => ({ ...current, impact: event.target.value as ManualIncidentImpact }))}
+                          className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                        >
+                          <option value="DEGRADED">Degraded</option>
+                          <option value="PARTIAL_OUTAGE">Partial outage</option>
+                          <option value="MAJOR_OUTAGE">Major outage</option>
+                        </select>
+                      </label>
+
+                      <label className="block text-sm text-zinc-300 md:col-span-2">
+                        Initial update
+                        <textarea
+                          value={manualIncidentForm.message}
+                          onChange={(event) => setManualIncidentForm((current) => ({ ...current, message: event.target.value }))}
+                          className="mt-2 min-h-24 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                          placeholder="We are investigating elevated authentication errors."
+                        />
+                      </label>
+
+                      <div className="md:col-span-2 rounded-md border border-zinc-700 bg-zinc-900/60 p-3">
+                        <div className="mb-2 text-sm font-medium text-zinc-200">Affected monitors</div>
+                        {monitors.length === 0 ? (
+                          <div className="text-sm text-zinc-400">No monitors available yet.</div>
+                        ) : (
+                          <div className="grid gap-2 sm:grid-cols-2">
+                            {monitors.map((monitor) => (
+                              <label key={monitor.id} className="flex items-center gap-2 rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-sm text-zinc-200">
+                                <input
+                                  type="checkbox"
+                                  checked={manualIncidentForm.monitorIds.includes(monitor.id)}
+                                  onChange={() => toggleManualIncidentMonitor(monitor.id)}
+                                  className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-emerald-400"
+                                />
+                                {monitor.name}
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="mt-5 flex gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void handleCreateManualIncident()}
+                        className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-slate-950"
+                      >
+                        Create manual incident
+                      </button>
+                      <button
+                        type="button"
+                        onClick={resetManualIncidentCreateForm}
+                        className="rounded-md border border-zinc-700 bg-zinc-900 px-4 py-2 text-sm text-zinc-200"
+                      >
+                        Reset
+                      </button>
+                    </div>
+
+                    {manualIncidents.length > 0 ? (
+                      <div className="mt-6 grid gap-4 lg:grid-cols-2">
+                        <div className="space-y-3">
+                          {manualIncidents.map((incident) => (
+                            <button
+                              key={incident.id}
+                              type="button"
+                              onClick={() => setSelectedManualIncidentId(incident.id)}
+                              className={[
+                                'w-full rounded-md border p-3 text-left',
+                                activeManualIncidentId === incident.id
+                                  ? 'border-emerald-500/40 bg-emerald-500/10'
+                                  : 'border-zinc-700 bg-zinc-950/70',
+                              ].join(' ')}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="text-sm font-medium text-zinc-100">{incident.title}</div>
+                                <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.2em] text-zinc-300">
+                                  {incident.status}
+                                </span>
+                              </div>
+                              <div className="mt-1 text-xs text-zinc-400">{incident.impact.replaceAll('_', ' ')}</div>
+                              <div className="mt-1 text-xs text-zinc-400">{new Date(incident.startedAt).toLocaleString()}</div>
+                            </button>
+                          ))}
+                        </div>
+
+                        <div className="rounded-md border border-zinc-700 bg-zinc-950/70 p-3">
+                          {selectedManualIncident ? (
+                            <>
+                              <div className="flex items-center justify-between gap-2">
+                                <div>
+                                  <div className="text-sm font-medium text-zinc-100">{selectedManualIncident.title}</div>
+                                  <div className="mt-1 text-xs text-zinc-400">
+                                    {selectedManualIncident.impact.replaceAll('_', ' ')} · {selectedManualIncident.status}
+                                  </div>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => beginEditManualIncident(selectedManualIncident)}
+                                  className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-100"
+                                >
+                                  Edit metadata
+                                </button>
+                              </div>
+
+                              <div className="mt-2 text-xs text-zinc-400">
+                                Monitors: {selectedManualIncident.monitors.length > 0 ? selectedManualIncident.monitors.map((monitor) => monitor.name).join(', ') : 'None'}
+                              </div>
+
+                              <div className="mt-3 space-y-2">
+                                {selectedManualIncident.updates.map((update) => (
+                                  <div key={update.id} className="rounded-md border border-zinc-700 bg-zinc-900/70 p-3">
+                                    <div className="flex items-center justify-between gap-2">
+                                      <span className="text-xs font-medium uppercase tracking-[0.2em] text-zinc-300">{update.status}</span>
+                                      <span className="text-xs text-zinc-400">{new Date(update.createdAt).toLocaleString()}</span>
+                                    </div>
+                                    <div className="mt-1 text-sm text-zinc-200">{update.message}</div>
+                                  </div>
+                                ))}
+                              </div>
+
+                              {selectedManualIncident.status !== 'RESOLVED' ? (
+                                <div className="mt-4 rounded-md border border-zinc-700 bg-zinc-900/60 p-3">
+                                  <div className="text-sm font-medium text-zinc-200">Publish update</div>
+                                  <label className="mt-3 block text-sm text-zinc-300">
+                                    Status
+                                    <select
+                                      value={manualIncidentUpdateForm.status}
+                                      onChange={(event) => setManualIncidentUpdateForm((current) => ({ ...current, status: event.target.value as ManualIncidentStatus }))}
+                                      className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                                    >
+                                      <option value="INVESTIGATING">Investigating</option>
+                                      <option value="IDENTIFIED">Identified</option>
+                                      <option value="MONITORING">Monitoring</option>
+                                      <option value="RESOLVED">Resolved</option>
+                                    </select>
+                                  </label>
+                                  <label className="mt-3 block text-sm text-zinc-300">
+                                    Message
+                                    <textarea
+                                      value={manualIncidentUpdateForm.message}
+                                      onChange={(event) => setManualIncidentUpdateForm((current) => ({ ...current, message: event.target.value }))}
+                                      className="mt-2 min-h-20 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                                      placeholder="Share progress update"
+                                    />
+                                  </label>
+                                  <div className="mt-3 flex gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => void handlePublishManualIncidentUpdate(selectedManualIncident)}
+                                      className="rounded-md bg-emerald-500 px-3 py-2 text-xs font-medium text-slate-950"
+                                    >
+                                      Publish update
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={resetManualIncidentUpdateForm}
+                                      className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-200"
+                                    >
+                                      Reset
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : null}
+
+                              {editingManualIncidentId === selectedManualIncident.id ? (
+                                <div className="mt-4 rounded-md border border-zinc-700 bg-zinc-900/60 p-3">
+                                  <div className="text-sm font-medium text-zinc-200">Edit metadata</div>
+                                  <label className="mt-3 block text-sm text-zinc-300">
+                                    Title
+                                    <input
+                                      value={manualIncidentMetadataForm.title}
+                                      onChange={(event) => setManualIncidentMetadataForm((current) => ({ ...current, title: event.target.value }))}
+                                      className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                                    />
+                                  </label>
+                                  <label className="mt-3 block text-sm text-zinc-300">
+                                    Impact
+                                    <select
+                                      value={manualIncidentMetadataForm.impact}
+                                      onChange={(event) => setManualIncidentMetadataForm((current) => ({ ...current, impact: event.target.value as ManualIncidentImpact }))}
+                                      className="mt-2 w-full rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-zinc-100"
+                                    >
+                                      <option value="DEGRADED">Degraded</option>
+                                      <option value="PARTIAL_OUTAGE">Partial outage</option>
+                                      <option value="MAJOR_OUTAGE">Major outage</option>
+                                    </select>
+                                  </label>
+                                  <div className="mt-3">
+                                    <div className="mb-2 text-sm text-zinc-300">Affected monitors</div>
+                                    <div className="grid gap-2 sm:grid-cols-2">
+                                      {monitors.map((monitor) => (
+                                        <label key={monitor.id} className="flex items-center gap-2 rounded-md border border-zinc-700 bg-[#070a0d] px-3 py-2 text-sm text-zinc-200">
+                                          <input
+                                            type="checkbox"
+                                            checked={manualIncidentMetadataForm.monitorIds.includes(monitor.id)}
+                                            onChange={() => toggleManualIncidentMetadataMonitor(monitor.id)}
+                                            className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-emerald-400"
+                                          />
+                                          {monitor.name}
+                                        </label>
+                                      ))}
+                                    </div>
+                                  </div>
+                                  <div className="mt-3 flex gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleSaveManualIncidentMetadata(selectedManualIncident)}
+                                      className="rounded-md bg-emerald-500 px-3 py-2 text-xs font-medium text-slate-950"
+                                    >
+                                      Save
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={resetManualIncidentMetadataForm}
+                                      className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-200"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : null}
+
+                              <div className="mt-4">
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDeleteManualIncident(selectedManualIncident)}
+                                  className="rounded-md border border-red-700 bg-red-950/30 px-3 py-2 text-xs text-red-200"
+                                >
+                                  Delete manual incident
+                                </button>
+                              </div>
+                            </>
+                          ) : (
+                            <div className="text-sm text-zinc-400">Select an incident to view timeline and publish updates.</div>
+                          )}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="mt-6 text-sm text-zinc-400">No manual incidents yet.</div>
+                    )}
                   </div>
 
                   <div className="rounded-lg border border-zinc-700 bg-zinc-950/40 p-5">

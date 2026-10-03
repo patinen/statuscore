@@ -8,6 +8,7 @@ import { AuthModule } from './auth/auth.module.js';
 import { DatabaseModule } from './database/database.module.js';
 import { IncidentsModule } from './incidents/incidents.module.js';
 import { MaintenanceWindowsModule } from './maintenance-windows/maintenance-windows.module.js';
+import { ManualIncidentsModule } from './manual-incidents/manual-incidents.module.js';
 import { MonitoringModule } from './monitoring/monitoring.module.js';
 import { MonitoringSchedulerModule } from './monitoring/monitoring-scheduler.module.js';
 import { MonitorsModule } from './monitors/monitors.module.js';
@@ -25,6 +26,7 @@ import { StatusPagesModule } from './status-pages/status-pages.module.js';
     AuthModule,
     AnalyticsModule,
     MaintenanceWindowsModule,
+    ManualIncidentsModule,
     MonitorsModule,
     IncidentsModule,
     MonitoringModule,

@@ -41,6 +41,7 @@ type PublicStatusPageMonitor = {
 };
 
 type PublicStatusPageRecord = {
+  userId: string;
   id: string;
   name: string;
   slug: string;
@@ -51,7 +52,28 @@ type PublicStatusPageRecord = {
 };
 
 type PublicMonitorStatus = 'OPERATIONAL' | 'OUTAGE' | 'MAINTENANCE' | 'UNKNOWN';
-type PublicPageStatus = 'OPERATIONAL' | 'OUTAGE' | 'MAINTENANCE' | 'UNKNOWN';
+type PublicPageStatus = 'OPERATIONAL' | 'OUTAGE' | 'DEGRADED' | 'MAINTENANCE' | 'UNKNOWN';
+type ManualIncidentImpact = 'DEGRADED' | 'PARTIAL_OUTAGE' | 'MAJOR_OUTAGE';
+type ManualIncidentStatus = 'INVESTIGATING' | 'IDENTIFIED' | 'MONITORING' | 'RESOLVED';
+
+type PublicManualIncidentRecord = {
+  title: string;
+  impact: ManualIncidentImpact;
+  status: ManualIncidentStatus;
+  startedAt: Date;
+  resolvedAt: Date | null;
+  monitorAssociations: Array<{
+    monitorId: string;
+    monitor: {
+      name: string;
+    };
+  }>;
+  updates: Array<{
+    status: ManualIncidentStatus;
+    message: string;
+    createdAt: Date;
+  }>;
+};
 
 @Injectable()
 export class StatusPagesService {
@@ -105,9 +127,20 @@ export class StatusPagesService {
     return 'UNKNOWN';
   }
 
-  private static overallStatusForPublic(monitorStatuses: PublicMonitorStatus[]): PublicPageStatus {
-    if (monitorStatuses.some((status) => status === 'OUTAGE')) {
+  private static overallStatusForPublic(
+    monitorStatuses: PublicMonitorStatus[],
+    activeManualImpacts: ManualIncidentImpact[],
+  ): PublicPageStatus {
+    const hasMajorOutageManual = activeManualImpacts.some((impact) => impact === 'MAJOR_OUTAGE');
+    const hasPartialOutageManual = activeManualImpacts.some((impact) => impact === 'PARTIAL_OUTAGE');
+    const hasDegradedManual = activeManualImpacts.some((impact) => impact === 'DEGRADED');
+
+    if (hasMajorOutageManual || monitorStatuses.some((status) => status === 'OUTAGE')) {
       return 'OUTAGE';
+    }
+
+    if (hasPartialOutageManual || hasDegradedManual) {
+      return 'DEGRADED';
     }
 
     if (monitorStatuses.some((status) => status === 'MAINTENANCE')) {
@@ -413,6 +446,78 @@ export class StatusPagesService {
       this.maintenanceWindowsService.getActivePublicMaintenanceForMonitors(monitoredIds, now),
     ]);
 
+    const [activeManualIncidents, recentResolvedManualIncidents] = await Promise.all([
+      monitoredIds.length > 0
+        ? this.prisma.manualIncident.findMany({
+            where: {
+              userId: currentPage.userId,
+              status: { not: 'RESOLVED' },
+              monitorAssociations: {
+                some: {
+                  monitorId: { in: monitoredIds },
+                },
+              },
+            },
+            orderBy: [{ startedAt: 'desc' }, { createdAt: 'desc' }],
+            take: 50,
+            include: {
+              monitorAssociations: {
+                where: {
+                  monitorId: { in: monitoredIds },
+                },
+                include: {
+                  monitor: {
+                    select: {
+                      name: true,
+                    },
+                  },
+                },
+                orderBy: { createdAt: 'asc' },
+              },
+              updates: {
+                orderBy: { createdAt: 'asc' },
+                take: 50,
+              },
+            },
+          })
+        : Promise.resolve([]),
+      monitoredIds.length > 0
+        ? this.prisma.manualIncident.findMany({
+            where: {
+              userId: currentPage.userId,
+              status: 'RESOLVED',
+              resolvedAt: { not: null },
+              monitorAssociations: {
+                some: {
+                  monitorId: { in: monitoredIds },
+                },
+              },
+            },
+            orderBy: [{ resolvedAt: 'desc' }, { updatedAt: 'desc' }],
+            take: 20,
+            include: {
+              monitorAssociations: {
+                where: {
+                  monitorId: { in: monitoredIds },
+                },
+                include: {
+                  monitor: {
+                    select: {
+                      name: true,
+                    },
+                  },
+                },
+                orderBy: { createdAt: 'asc' },
+              },
+              updates: {
+                orderBy: { createdAt: 'asc' },
+                take: 50,
+              },
+            },
+          })
+        : Promise.resolve([]),
+    ]);
+
     const monitorIdsUnderMaintenance = new Set(
       activeMaintenanceWindows.flatMap((window) => window.monitorIds),
     );
@@ -431,7 +536,26 @@ export class StatusPagesService {
       };
     });
 
-    const overallStatus = StatusPagesService.overallStatusForPublic(publicMonitors.map((monitor) => monitor.status));
+    const overallStatus = StatusPagesService.overallStatusForPublic(
+      publicMonitors.map((monitor) => monitor.status),
+      activeManualIncidents.map((incident) => incident.impact as ManualIncidentImpact),
+    );
+
+    const mapManualIncident = (incident: PublicManualIncidentRecord) => ({
+      title: incident.title,
+      impact: incident.impact,
+      status: incident.status,
+      startedAt: incident.startedAt,
+      resolvedAt: incident.resolvedAt,
+      monitors: incident.monitorAssociations
+        .map((association) => monitorLabelById.get(association.monitorId) ?? association.monitor.name)
+        .filter((name, index, array) => array.indexOf(name) === index),
+      updates: incident.updates.map((update) => ({
+        status: update.status,
+        message: update.message,
+        createdAt: update.createdAt,
+      })),
+    });
 
     return {
       page: {
@@ -442,6 +566,10 @@ export class StatusPagesService {
       },
       overallStatus,
       monitors: publicMonitors.map(({ monitorId: _monitorId, ...monitor }) => monitor),
+      manualIncidents: activeManualIncidents.map((incident) => mapManualIncident(incident as PublicManualIncidentRecord)),
+      recentResolvedManualIncidents: recentResolvedManualIncidents.map((incident) =>
+        mapManualIncident(incident as PublicManualIncidentRecord),
+      ),
       activeMaintenance: activeMaintenanceWindows.map((window) => ({
         title: window.title,
         description: window.description,

@@ -30,6 +30,9 @@ const createService = (overrides: Record<string, unknown> = {}) => {
     incident: {
       findMany: vi.fn(),
     },
+    manualIncident: {
+      findMany: vi.fn().mockResolvedValue([]),
+    },
     maintenanceWindow: {
       findMany: vi.fn(),
     },
@@ -486,11 +489,14 @@ describe('StatusPagesService public status API', () => {
         { monitorName: 'Docs', reason: 'Recovered' },
       ],
       activeMaintenance: [],
+      manualIncidents: [],
+      recentResolvedManualIncidents: [],
     });
 
     expect(result?.page).not.toHaveProperty('userId');
     expect(result?.monitors[0]).not.toHaveProperty('url');
     expect(result?.activeIncidents[0]).not.toHaveProperty('lastError');
+    expect(result?.manualIncidents).toEqual([]);
   });
 
   it('returns outage when any included monitor is down and unknown when all are unknown or disabled', async () => {
@@ -667,5 +673,240 @@ describe('StatusPagesService public status API', () => {
         { name: 'DB', status: 'MAINTENANCE' },
       ],
     });
+  });
+
+  it('exposes only relevant manual incidents and only monitor names present on the current page', async () => {
+    const { service, prisma, maintenanceWindowsService } = createService();
+
+    prisma.statusPage.findFirst.mockResolvedValueOnce({
+      id: 'page-1',
+      userId: 'user-1',
+      name: 'Public',
+      slug: 'public',
+      description: null,
+      enabled: true,
+      updatedAt: now,
+      monitorAssociations: [
+        { monitorId: 'm1', displayName: 'API', monitor: { name: 'API', enabled: true, currentStatus: 'UP', lastCheckedAt: now } },
+        { monitorId: 'm2', displayName: 'Website', monitor: { name: 'Website', enabled: true, currentStatus: 'UP', lastCheckedAt: now } },
+      ],
+    });
+
+    prisma.incident.findMany.mockResolvedValue([]);
+    prisma.manualIncident.findMany
+      .mockResolvedValueOnce([
+        {
+          id: 'mi-1',
+          title: 'Login issues',
+          impact: 'PARTIAL_OUTAGE',
+          status: 'IDENTIFIED',
+          startedAt: now,
+          resolvedAt: null,
+          monitorAssociations: [
+            { monitorId: 'm1', monitor: { name: 'API' } },
+            { monitorId: 'm2', monitor: { name: 'Website' } },
+          ],
+          updates: [
+            { status: 'INVESTIGATING', message: 'Investigating.', createdAt: new Date('2026-10-03T00:00:00Z') },
+            { status: 'IDENTIFIED', message: 'Identified.', createdAt: new Date('2026-10-03T00:10:00Z') },
+          ],
+        },
+      ])
+      .mockResolvedValueOnce([]);
+
+    maintenanceWindowsService.getActivePublicMaintenanceForMonitors.mockResolvedValueOnce([]);
+
+    const result = await service.getPublicBySlug('public');
+
+    expect(result?.manualIncidents).toEqual([
+      {
+        title: 'Login issues',
+        impact: 'PARTIAL_OUTAGE',
+        status: 'IDENTIFIED',
+        startedAt: now,
+        resolvedAt: null,
+        monitors: ['API', 'Website'],
+        updates: [
+          { status: 'INVESTIGATING', message: 'Investigating.', createdAt: new Date('2026-10-03T00:00:00Z') },
+          { status: 'IDENTIFIED', message: 'Identified.', createdAt: new Date('2026-10-03T00:10:00Z') },
+        ],
+      },
+    ]);
+
+    expect(result?.manualIncidents[0]).not.toHaveProperty('userId');
+    expect(result?.manualIncidents[0].monitors).not.toContain('Internal DB');
+  });
+
+  it('applies manual incident priority with outage/degraded/maintenance combinations', async () => {
+    const { service, prisma, maintenanceWindowsService } = createService();
+
+    prisma.statusPage.findFirst
+      .mockResolvedValueOnce({
+        id: 'page-major',
+        userId: 'user-1',
+        name: 'Major',
+        slug: 'major',
+        description: null,
+        enabled: true,
+        updatedAt: now,
+        monitorAssociations: [
+          { monitorId: 'm1', displayName: null, monitor: { name: 'API', enabled: true, currentStatus: 'UP', lastCheckedAt: now } },
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: 'page-partial',
+        userId: 'user-1',
+        name: 'Partial',
+        slug: 'partial',
+        description: null,
+        enabled: true,
+        updatedAt: now,
+        monitorAssociations: [
+          { monitorId: 'm2', displayName: null, monitor: { name: 'Web', enabled: true, currentStatus: 'UP', lastCheckedAt: now } },
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: 'page-degraded-maint',
+        userId: 'user-1',
+        name: 'Degraded + Maint',
+        slug: 'degraded-maint',
+        description: null,
+        enabled: true,
+        updatedAt: now,
+        monitorAssociations: [
+          { monitorId: 'm3', displayName: null, monitor: { name: 'Docs', enabled: true, currentStatus: 'DOWN', lastCheckedAt: now } },
+        ],
+      })
+      .mockResolvedValueOnce({
+        id: 'page-outage-maint',
+        userId: 'user-1',
+        name: 'Outage + Maint',
+        slug: 'outage-maint',
+        description: null,
+        enabled: true,
+        updatedAt: now,
+        monitorAssociations: [
+          { monitorId: 'm4', displayName: null, monitor: { name: 'Jobs', enabled: true, currentStatus: 'DOWN', lastCheckedAt: now } },
+          { monitorId: 'm5', displayName: null, monitor: { name: 'API', enabled: true, currentStatus: 'DOWN', lastCheckedAt: now } },
+        ],
+      });
+
+    prisma.incident.findMany.mockResolvedValue([]);
+
+    prisma.manualIncident.findMany
+      .mockResolvedValueOnce([
+        {
+          id: 'mi-major',
+          title: 'Major issue',
+          impact: 'MAJOR_OUTAGE',
+          status: 'INVESTIGATING',
+          startedAt: now,
+          resolvedAt: null,
+          monitorAssociations: [{ monitorId: 'm1', monitor: { name: 'API' } }],
+          updates: [],
+        },
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: 'mi-partial',
+          title: 'Partial issue',
+          impact: 'PARTIAL_OUTAGE',
+          status: 'IDENTIFIED',
+          startedAt: now,
+          resolvedAt: null,
+          monitorAssociations: [{ monitorId: 'm2', monitor: { name: 'Web' } }],
+          updates: [],
+        },
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: 'mi-degraded',
+          title: 'Degraded issue',
+          impact: 'DEGRADED',
+          status: 'MONITORING',
+          startedAt: now,
+          resolvedAt: null,
+          monitorAssociations: [{ monitorId: 'm3', monitor: { name: 'Docs' } }],
+          updates: [],
+        },
+      ])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+
+    maintenanceWindowsService.getActivePublicMaintenanceForMonitors
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          title: 'Maint',
+          description: null,
+          startsAt: now,
+          endsAt: new Date(now.getTime() + 60_000),
+          monitorIds: ['m3'],
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          title: 'Maint',
+          description: null,
+          startsAt: now,
+          endsAt: new Date(now.getTime() + 60_000),
+          monitorIds: ['m4'],
+        },
+      ]);
+
+    const major = await service.getPublicBySlug('major');
+    const partial = await service.getPublicBySlug('partial');
+    const degradedOverMaintenance = await service.getPublicBySlug('degraded-maint');
+    const outageOverMaintenance = await service.getPublicBySlug('outage-maint');
+
+    expect(major?.overallStatus).toBe('OUTAGE');
+    expect(partial?.overallStatus).toBe('DEGRADED');
+    expect(degradedOverMaintenance?.overallStatus).toBe('DEGRADED');
+    expect(outageOverMaintenance?.overallStatus).toBe('OUTAGE');
+  });
+
+  it('returns recent resolved manual incidents bounded and sorted by newest resolution', async () => {
+    const { service, prisma, maintenanceWindowsService } = createService();
+
+    prisma.statusPage.findFirst.mockResolvedValueOnce({
+      id: 'page-1',
+      userId: 'user-1',
+      name: 'Resolved history',
+      slug: 'resolved-history',
+      description: null,
+      enabled: true,
+      updatedAt: now,
+      monitorAssociations: [
+        { monitorId: 'm1', displayName: null, monitor: { name: 'API', enabled: true, currentStatus: 'UP', lastCheckedAt: now } },
+      ],
+    });
+
+    prisma.incident.findMany.mockResolvedValue([]);
+    prisma.manualIncident.findMany
+      .mockResolvedValueOnce([])
+      .mockImplementationOnce(async (args: { take?: number }) =>
+        Array.from({ length: args.take ?? 20 }, (_, index) => ({
+          id: `mi-resolved-${index}`,
+          title: `Resolved ${index}`,
+          impact: 'DEGRADED',
+          status: 'RESOLVED',
+          startedAt: new Date('2026-10-03T00:00:00Z'),
+          resolvedAt: new Date(`2026-10-${String(30 - index).padStart(2, '0')}T00:00:00Z`),
+          monitorAssociations: [{ monitorId: 'm1', monitor: { name: 'API' } }],
+          updates: [{ status: 'RESOLVED', message: 'Done', createdAt: now }],
+        })),
+      );
+
+    maintenanceWindowsService.getActivePublicMaintenanceForMonitors.mockResolvedValueOnce([]);
+
+    const result = await service.getPublicBySlug('resolved-history');
+
+    expect(result?.recentResolvedManualIncidents).toHaveLength(20);
+    expect(result?.recentResolvedManualIncidents[0].title).toBe('Resolved 0');
+    expect(result?.recentResolvedManualIncidents[19].title).toBe('Resolved 19');
   });
 });
