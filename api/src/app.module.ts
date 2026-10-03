@@ -9,6 +9,7 @@ import { IncidentsModule } from './incidents/incidents.module.js';
 import { MonitoringModule } from './monitoring/monitoring.module.js';
 import { MonitoringSchedulerModule } from './monitoring/monitoring-scheduler.module.js';
 import { MonitorsModule } from './monitors/monitors.module.js';
+import { NotificationsModule } from './notifications/notifications.module.js';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { MonitorsModule } from './monitors/monitors.module.js';
     IncidentsModule,
     MonitoringModule,
     MonitoringSchedulerModule,
+    NotificationsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

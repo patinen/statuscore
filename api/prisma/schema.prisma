@@ -17,6 +17,7 @@ model User {
   updatedAt DateTime @updatedAt
 
   monitors Monitor[]
+  notificationChannels NotificationChannel[]
 }
 
 model Monitor {
@@ -37,12 +38,82 @@ model Monitor {
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
-  user        User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  checkResults CheckResult[]
-  incidents   Incident[]
+  user                  User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  checkResults          CheckResult[]
+  incidents            Incident[]
+  notificationChannels MonitorNotificationChannel[]
 
   @@index([userId])
   @@index([enabled, nextCheckAt])
+}
+
+enum NotificationChannelType {
+  DISCORD
+  WEBHOOK
+}
+
+enum NotificationDeliveryEventType {
+  INCIDENT_OPENED
+  INCIDENT_RESOLVED
+}
+
+enum NotificationDeliveryStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+}
+
+model NotificationChannel {
+  id                String                   @id @default(uuid()) @db.Uuid
+  userId            String                   @db.Uuid
+  name              String                   @db.VarChar(100)
+  type              NotificationChannelType
+  endpointEncrypted String                   @db.VarChar(2048)
+  enabled           Boolean                  @default(true)
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+
+  user                     User                         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  monitorAssociations      MonitorNotificationChannel[]
+  deliveries               NotificationDelivery[]
+
+  @@index([userId, enabled])
+}
+
+model MonitorNotificationChannel {
+  monitorId String @db.Uuid
+  channelId String @db.Uuid
+  createdAt DateTime @default(now())
+
+  monitor Monitor @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  channel NotificationChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@id([monitorId, channelId])
+  @@index([channelId])
+}
+
+model NotificationDelivery {
+  id            String                       @id @default(uuid()) @db.Uuid
+  channelId     String?                      @db.Uuid
+  incidentId    String                       @db.Uuid
+  eventType     NotificationDeliveryEventType
+  status        NotificationDeliveryStatus   @default(PENDING)
+  attemptCount  Int                          @default(0)
+  nextAttemptAt DateTime?
+  lastAttemptAt DateTime?
+  sentAt        DateTime?
+  lastError     String?
+  createdAt     DateTime                     @default(now())
+  updatedAt     DateTime                     @updatedAt
+
+  channel  NotificationChannel? @relation(fields: [channelId], references: [id], onDelete: SetNull)
+  incident Incident            @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, incidentId, eventType])
+  @@index([status, nextAttemptAt])
+  @@index([channelId])
+  @@index([incidentId])
 }
 
 model CheckResult {
@@ -68,7 +139,8 @@ model Incident {
   reason     String?
   lastError  String?
 
-  monitor Monitor @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  monitor    Monitor               @relation(fields: [monitorId], references: [id], onDelete: Cascade)
+  deliveries NotificationDelivery[]
 
   @@index([monitorId, startedAt])
   @@index([monitorId, resolvedAt])

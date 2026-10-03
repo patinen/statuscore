@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service.js';
+import { NotificationDeliveryService } from '../notifications/notification-delivery.service.js';
 import { SafeHttpClientService } from './safe-http-client.service.js';
 
 const MAX_TRANSACTION_RETRIES = 4;
@@ -12,6 +13,7 @@ export class MonitorExecutionService {
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(SafeHttpClientService) private readonly safeHttpClient: SafeHttpClientService,
+    @Inject(NotificationDeliveryService) private readonly notificationDeliveryService?: NotificationDeliveryService,
   ) {}
 
   private buildIncidentReason(result: { errorType: string | null; statusCode: number | null }, expectedStatusCode: number): string {
@@ -87,6 +89,44 @@ export class MonitorExecutionService {
     throw new Error('Monitor transaction retry budget exhausted.');
   }
 
+  private async createIncidentNotifications(
+    tx: any,
+    incidentId: string,
+    eventType: 'INCIDENT_OPENED' | 'INCIDENT_RESOLVED',
+    monitorId: string,
+    checkedAt: Date,
+  ): Promise<void> {
+    if (!this.notificationDeliveryService) {
+      return;
+    }
+
+    const monitorNotificationChannel = tx.monitorNotificationChannel;
+    if (!monitorNotificationChannel || typeof monitorNotificationChannel.findMany !== 'function') {
+      return;
+    }
+
+    const channelRows = await monitorNotificationChannel.findMany({
+      where: { monitorId },
+      include: { channel: true },
+    });
+
+    const enabledChannelIds = channelRows
+      .filter((row: { channel?: { enabled?: boolean } }) => Boolean(row.channel?.enabled))
+      .map((row: { channelId: string }) => row.channelId);
+
+    if (enabledChannelIds.length === 0) {
+      return;
+    }
+
+    await this.notificationDeliveryService.createForIncidentTransition(
+      tx,
+      incidentId,
+      eventType,
+      enabledChannelIds,
+      checkedAt,
+    );
+  }
+
   async processMonitorCheck(monitorId: string): Promise<void> {
     const monitor = await this.prisma.monitor.findUnique({ where: { id: monitorId } });
 
@@ -136,8 +176,10 @@ export class MonitorExecutionService {
           orderBy: { startedAt: 'desc' },
         });
 
+        let incidentId: string | null = activeIncident?.id ?? null;
+
         if (didTransitionDown) {
-          await tx.incident.create({
+          const createdIncident = await tx.incident.create({
             data: {
               monitorId: state.id,
               startedAt: checkedAt,
@@ -145,9 +187,14 @@ export class MonitorExecutionService {
               lastError: result.errorMessage ?? null,
             },
           });
+          incidentId = createdIncident?.id ?? null;
+
+          if (incidentId) {
+            await this.createIncidentNotifications(tx, incidentId, 'INCIDENT_OPENED', state.id, checkedAt);
+          }
         } else if (didRecover) {
           if (activeIncident) {
-            await tx.incident.update({
+            const resolvedIncident = await tx.incident.update({
               where: { id: activeIncident.id },
               data: {
                 resolvedAt: checkedAt,
@@ -155,6 +202,9 @@ export class MonitorExecutionService {
                 lastError: activeIncident.lastError ?? result.errorMessage ?? null,
               },
             });
+            incidentId = resolvedIncident?.id ?? activeIncident.id;
+
+            await this.createIncidentNotifications(tx, incidentId, 'INCIDENT_RESOLVED', state.id, checkedAt);
           } else {
             this.logger.warn(
               `Monitor ${monitorId} recovered to UP without an open incident. Preserving recovered state without creating a synthetic incident.`,
