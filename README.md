@@ -147,6 +147,8 @@ statuscore/
 
 ## Local development
 
+For production, follow [DEPLOYMENT.md](DEPLOYMENT.md) for the exact Coolify resources, commands, migration order, and smoke tests. The env example files contain production placeholders; override them with the localhost values below for development.
+
 ### Prerequisites
 
 - Node.js 20+
@@ -210,6 +212,7 @@ npm run start:worker
 ```env
 NODE_ENV=development
 PORT=3001
+CORS_ORIGIN=http://localhost:3000
 WEB_URL=http://localhost:3000
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
@@ -219,7 +222,7 @@ DATABASE_URL=postgresql://statuscore:statuscore_dev_password@localhost:5432/stat
 REDIS_URL=redis://localhost:6379
 MONITOR_WORKER_CONCURRENCY=10
 NOTIFICATION_WORKER_CONCURRENCY=5
-NOTIFICATION_ENCRYPTION_KEY=replace-with-a-32-byte-base64-or-raw-key
+NOTIFICATION_ENCRYPTION_KEY=replace-with-base64-32-byte-key
 ```
 
 ### Web (.env.local)
