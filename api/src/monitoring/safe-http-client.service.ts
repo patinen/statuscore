@@ -2,7 +2,7 @@ import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
-import * as ipaddr from 'ipaddr.js';
+import ipaddr from 'ipaddr.js';
 import { DnsResolverService } from '../monitors/dns-resolver.service.js';
 import { TargetUrlValidationService } from '../monitors/ssrf-validation.service.js';
 import { TargetAddressService } from './target-address.service.js';

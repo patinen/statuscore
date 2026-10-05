@@ -1,5 +1,5 @@
 import { BadRequestException, Inject, Injectable } from '@nestjs/common';
-import * as ipaddr from 'ipaddr.js';
+import ipaddr from 'ipaddr.js';
 import { isIP } from 'node:net';
 import { DnsResolverService } from './dns-resolver.service.js';
 import { TargetAddressService } from '../monitoring/target-address.service.js';

@@ -2,7 +2,7 @@ import { BadRequestException, Inject, Injectable, Logger } from '@nestjs/common'
 import { Prisma, type NotificationChannel, type NotificationDeliveryEventType, type NotificationDeliveryStatus, type Incident, type ManualIncidentImpact, type ManualIncidentStatus, type Monitor, type User } from '@prisma/client';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
-import * as ipaddr from 'ipaddr.js';
+import ipaddr from 'ipaddr.js';
 import { PrismaService } from '../database/prisma.service.js';
 import { DnsResolverService } from '../monitors/dns-resolver.service.js';
 import { TargetAddressService } from '../monitoring/target-address.service.js';
