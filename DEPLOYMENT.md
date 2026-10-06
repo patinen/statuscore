@@ -1,10 +1,10 @@
-﻿# StatusCore production deployment
+# StatusCore production deployment
 
-Source audited: Phase 10, commit `7349639`. This guide covers preparation, not a live deployment. Use npm and the committed package locks. No new product features or distributed leader election are required.
+Source audited: commit `7d7b0e0a311fc0188230b110c2e623a4808c53f4` (`correct ipaddr ESM interoperability`), on 2026-10-06. This guide covers preparation, not a live deployment. Domains below are deployment configuration targets, not verified live URLs. Use npm and the committed package locks.
 
 ## Environment inventory
 
-All application configuration lookups in `api/` and `web/`, plus Prisma's schema, were inspected. `CORS_ORIGIN` is an additional variable beyond the requested minimum; it already existed at the source commit. No application variables are missing from the updated examples.
+Application configuration lookups in `api/` and `web/`, plus Prisma's schema, match the inventory below and the committed environment examples.
 
 | Variable | Process | Production value / requirement |
 | --- | --- | --- |
@@ -35,7 +35,7 @@ A. **PostgreSQL**: PostgreSQL 16, database `statuscore`, dedicated user/password
 
 B. **Redis**: Redis 7, password authentication, persistent volume/AOF enabled, `maxmemory-policy noeviction`, internal port 6379 only. The repository's local compose file disables persistence and contains development credentials; do not use it as production configuration.
 
-C-E. Create repository applications using the **Nixpacks** build pack, static site mode disabled, Node.js 22 (tested locally on 22.17.1). Set Coolify's build-only `NIXPACKS_NODE_VERSION=22`; this is build tooling configuration, not an application lookup. Use the following overrides. Base directories are relative to repository root and commands execute inside them.
+C-E. Create repository applications using the **Nixpacks** build pack, static site mode disabled, with Node.js 22 as the runtime target. The documentation audit host reports 22.17.1; application builds and live deployment were not rerun for this documentation-only pass. The packages do not declare a repository-wide Node engine pin. Set Coolify's build-only `NIXPACKS_NODE_VERSION=22`; this is build tooling configuration, not an application lookup. Use the following overrides. Base directories are relative to repository root and commands execute inside them.
 
 | Setting | API | Worker | Web |
 | --- | --- | --- | --- |
@@ -94,9 +94,9 @@ Multiple API replicas each schedule/recover deliveries. Conditional row claims r
 
 ## Health, auth and browser configuration
 
-Existing unauthenticated `GET /health` executes a database `SELECT 1`. Healthy response: HTTP 200 with `{"status":"ok","service":"statuscore-api","database":"connected"}`. Database query failure: HTTP 503 with `database: "disconnected"`. No secrets are exposed. It does not check Redis, worker consumption or migration completeness; verify those separately. No redundant endpoint was added.
+Unauthenticated `GET /health` executes a database `SELECT 1`. Healthy response: HTTP 200 with `{"status":"ok","service":"statuscore-api","database":"connected"}`. Database query failure: HTTP 503 with `database: "disconnected"`. No secrets are exposed. It does not check Redis, worker consumption or migration completeness; verify those separately.
 
-CORS allows the configured exact frontend origin and enables credentials. Blank `CORS_ORIGIN` now denies origins instead of reflecting arbitrary origins. The unset development default remains `http://localhost:3000`. Authenticated dashboard fetches send `credentials: "include"`; public `/status/[slug]` fetches need no authentication.
+CORS allows the configured exact frontend origin and enables credentials. Explicitly blank `CORS_ORIGIN` denies browser origins. The unset development default is `http://localhost:3000`. Authenticated dashboard fetches send `credentials: "include"`; public `/status/[slug]` fetches need no authentication.
 
 Both `sc_session` (seven days) and `sc_oauth_state` (ten minutes) are HttpOnly, SameSite=Lax, path `/`, and Secure when `NODE_ENV=production`. No Domain attribute means host-only cookies on `api.status.pat1.online`. Browser API requests between these HTTPS subdomains are same-site, so Lax works with credentialed CORS. GitHub callback is a top-level GET navigation, which also permits Lax state cookies. Cookies need not be shared with the frontend host. Coolify may terminate TLS; Secure is set from NODE_ENV, not Express's request protocol, so no trust-proxy change is required. Logout clears the same cookie name/host/path. HTTP localhost uses non-Secure cookies in development.
 
@@ -109,7 +109,11 @@ Only the dashboard and public status page define API base URLs. Both use `NEXT_P
 
 ## Outbound security
 
-Outbound implementation is unchanged: public IP validation, private/link-local/loopback and mapped-IP rejection, all DNS answer validation, pinned connections, TLS certificate verification, SNI and Host handling, no redirect following, HTTPS-only notification endpoints and Discord host restrictions remain enforced. Do not add `ALLOW_PRIVATE_NETWORK`. Database/Redis private connections are infrastructure connections, not monitored targets. Smoke-test targets must resolve exclusively to public addresses; do not use Docker service names or localhost targets. Allow DNS and required public outbound HTTP/HTTPS from the worker.
+Outbound requests validate all DNS answers against configured blocked ranges and pin a validated address while preserving Host and TLS server name, with certificate verification enabled. Private/link-local/loopback and configured special-use ranges are blocked; mapped IPv6 addresses are checked against underlying IPv4 rules, rather than all mapped forms being rejected.
+
+Monitor HTTP/HTTPS checks follow up to five redirects, validating and pinning every destination and detecting loops. Notification HTTPS POST requests reject redirects. Discord configuration permits `discord.com`, `discordapp.com` and their subdomains, with the exact `/api/webhooks/<numeric-id>/<token>` path and no query string. These explicit protections do not establish complete SSRF immunity. See [backend networking details](api/README.md#outbound-networking).
+
+Do not add `ALLOW_PRIVATE_NETWORK`. Database/Redis private connections are infrastructure connections, not monitored targets. Smoke-test targets must resolve exclusively to permitted public addresses; do not use Docker service names or localhost targets. Allow DNS and required public outbound HTTP/HTTPS from the worker.
 
 ## Production smoke tests
 
@@ -120,18 +124,27 @@ Outbound implementation is unchanged: public IP validation, private/link-local/l
 5. On an UP monitor create an active maintenance window, then fail the target for at least the threshold. Confirm checks persist, maintenance appears, no new automatic incident or INCIDENT_OPENED delivery is created. Restore target and end maintenance.
 6. Create a manual incident associated with the notification-linked monitor; add a timeline update and resolve it. Confirm `MANUAL_INCIDENT_OPENED`, `MANUAL_INCIDENT_UPDATED`, `MANUAL_INCIDENT_RESOLVED` arrive (generic webhook events `manual_incident.opened`, `manual_incident.updated`, `manual_incident.resolved`). Metadata-only edits do not emit an update event.
 
-## Local validation
+## Validation before deployment
 
-Validated locally on Node 22.17.1 / npm 10.9.2:
+Run these checks on the revision being deployed; older test counts or database state are not evidence for the current revision.
 
-- API `npm run db:generate`: passed (Prisma Client 6.19.3).
-- API `npm run lint`: passed, including after the CORS change.
-- API `npm run test`: 13 files / 149 tests passed.
-- API `npm run build`: passed, including after the CORS change.
-- `npm exec -- prisma migrate status`: all eight local migrations already applied; no migration was executed against production.
-- Web `npm run lint`: passed.
-- Web `npm run build`: passed with network access after the sandbox initially blocked the existing Google Fonts downloads; a subsequent build with `NEXT_PUBLIC_API_URL=https://api.status.pat1.online` also passed.
-- Web production process booted on an isolated test port and GET `/` returned 200, then was stopped.
-- API/worker boot was skipped: the local database contains 13 enabled monitors, so booting would run existing work. Module topology and consumer startup code were inspected instead. Full API/worker/OAuth runtime smoke tests remain deployment checks.
+```sh
+# In api/
+npm ci
+npm run db:generate
+npm run lint
+npm run test
+npm run build
+npm run test:dist
 
-No application code blocker was found in this audit. Deployment prerequisites remain real secrets, shared database/Redis network connectivity, migration success, DNS/TLS, build font access and live smoke tests. Live Coolify routing, OAuth and external notification delivery require production configuration and the smoke tests above. No production resources were deployed and no secrets were added to tracked files. No commit or push was made.
+# In web/, with NEXT_PUBLIC_API_URL set for the target deployment
+npm ci
+npm run lint
+npm run build
+```
+
+`test:dist` validates compiled production modules under native Node ESM, including `ipaddr.js` interoperability and public/private/mapped address handling. Source-level Vitest transformations can conceal those import failures. For future e2e work, use isolated database/Redis infrastructure: `npm run test:e2e` imports `AppModule` and initializes scheduler providers. Its legacy `/` → `Hello World!` assertion does not match the current `/health` controller and was not repaired or run in this documentation pass; it is not evidence of operational readiness.
+
+Eight migrations are committed; application to a particular database was not checked during this documentation pass. Inspect with `npm exec -- prisma migrate status` against the intended database before following the startup gate. Do not boot API/worker against populated infrastructure merely to inspect topology: startup can begin existing work.
+
+This documentation audit inspected source and did not run application builds/tests, start API/worker or deploy resources. Live Coolify routing, OAuth, migration state and external notification delivery remain unverified. Deployment prerequisites are secrets, shared database/Redis connectivity, migration success, DNS/TLS, build font access and the smoke tests above.
